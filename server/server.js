@@ -43,7 +43,7 @@ const config = require("./config");
 log.debug("server", "Arguments");
 log.debug("server", args);
 
-if (! process.env.NODE_ENV) {
+if (!process.env.NODE_ENV) {
     process.env.NODE_ENV = "production";
 }
 
@@ -320,6 +320,10 @@ let needSetup = false;
     // Status Page Router
     const statusPageRouter = require("./routers/status-page-router");
     app.use(statusPageRouter);
+
+    // Report Router
+    const reportRouter = require("./routers/report-router");
+    app.use("/api/reports", reportRouter);
 
     // Universal Route Handler, must be at the end of all express routes.
     app.get("*", async (_request, response) => {
@@ -732,7 +736,7 @@ let needSetup = false;
                  * List of frontend-only properties that should not be saved to the database.
                  * Should clean up before saving to the database.
                  */
-                const frontendOnlyProperties = [ "humanReadableInterval" ];
+                const frontendOnlyProperties = ["humanReadableInterval"];
                 for (const prop of frontendOnlyProperties) {
                     if (prop in monitor) {
                         delete monitor[prop];
@@ -780,7 +784,7 @@ let needSetup = false;
                 let removeGroupChildren = false;
                 checkLogin(socket);
 
-                let bean = await R.findOne("monitor", " id = ? ", [ monitor.id ]);
+                let bean = await R.findOne("monitor", " id = ? ", [monitor.id]);
 
                 if (bean.user_id !== socket.userID) {
                     throw new Error("Permission denied.");
@@ -964,7 +968,8 @@ let needSetup = false;
                     monitorID,
                     socket.userID,
                 ]);
-                const monitorData = [{ id: monitor.id,
+                const monitorData = [{
+                    id: monitor.id,
                     active: monitor.active
                 }];
                 const preloadData = await Monitor.preparePreloadData(monitorData);
@@ -1190,7 +1195,7 @@ let needSetup = false;
             try {
                 checkLogin(socket);
 
-                let bean = await R.findOne("tag", " id = ? ", [ tag.id ]);
+                let bean = await R.findOne("tag", " id = ? ", [tag.id]);
                 if (bean == null) {
                     callback({
                         ok: false,
@@ -1222,7 +1227,7 @@ let needSetup = false;
             try {
                 checkLogin(socket);
 
-                await R.exec("DELETE FROM tag WHERE id = ? ", [ tagID ]);
+                await R.exec("DELETE FROM tag WHERE id = ? ", [tagID]);
 
                 callback({
                     ok: true,
@@ -1762,7 +1767,7 @@ async function checkOwner(userID, monitorID) {
         userID,
     ]);
 
-    if (! row) {
+    if (!row) {
         throw new Error("You do not own this monitor.");
     }
 }
@@ -1826,7 +1831,7 @@ async function initDatabase(testMode = false) {
         "jwtSecret",
     ]);
 
-    if (! jwtSecretBean) {
+    if (!jwtSecretBean) {
         log.info("server", "JWT secret is not found, generate one.");
         jwtSecretBean = await initJWTSecret();
         log.info("server", "Stored JWT secret into database");

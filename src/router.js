@@ -8,6 +8,7 @@ import Details from "./pages/Details.vue";
 import EditMonitor from "./pages/EditMonitor.vue";
 import EditMaintenance from "./pages/EditMaintenance.vue";
 import List from "./pages/List.vue";
+import Reports from "./pages/Reports.vue";
 const Settings = () => import("./pages/Settings.vue");
 import Setup from "./pages/Setup.vue";
 import StatusPage from "./pages/StatusPage.vue";
@@ -83,6 +84,10 @@ const routes = [
                     {
                         path: "/list",
                         component: List,
+                    },
+                    {
+                        path: "/reports",
+                        component: Reports,
                     },
                     {
                         path: "/settings",
