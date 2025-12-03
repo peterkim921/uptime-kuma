@@ -206,9 +206,14 @@ export default {
     },
     mounted() {
         window.addEventListener("scroll", this.onScroll);
+        // Listen for filter events from DashboardHome
+        this.$root.emitter.on("filterMonitorByStatus", this.handleFilterByStatus);
+        this.$root.emitter.on("filterMonitorByPause", this.handleFilterByPause);
     },
     beforeUnmount() {
         window.removeEventListener("scroll", this.onScroll);
+        this.$root.emitter.off("filterMonitorByStatus", this.handleFilterByStatus);
+        this.$root.emitter.off("filterMonitorByPause", this.handleFilterByPause);
     },
     methods: {
         /**
@@ -307,6 +312,45 @@ export default {
             this.cancelSelectMode();
         },
         /**
+         * Handle filter by status event
+         * @param {object} data Event data with status
+         * @returns {void}
+         */
+        handleFilterByStatus(data) {
+            const newFilter = {
+                ...this.filterState
+            };
+
+            if (data.status === null) {
+                // Unknown status: filter monitors without heartbeat
+                newFilter.status = ["unknown"];
+            } else {
+                // Regular status: filter by status value
+                newFilter.status = [data.status];
+            }
+
+            // Clear active filter when filtering by status (except for pause)
+            newFilter.active = null;
+
+            this.updateFilter(newFilter);
+        },
+        /**
+         * Handle filter by pause event
+         * @returns {void}
+         */
+        handleFilterByPause() {
+            const newFilter = {
+                ...this.filterState
+            };
+
+            // Filter by paused monitors (active = false)
+            newFilter.active = [false];
+            // Clear status filter when filtering by pause
+            newFilter.status = null;
+
+            this.updateFilter(newFilter);
+        },
+        /**
          * Whether a monitor should be displayed based on the filters
          * @param {object} monitor Monitor to check
          * @returns {boolean} Should the monitor be displayed
@@ -334,10 +378,20 @@ export default {
             // filter by status
             let statusMatch = true;
             if (this.filterState.status != null && this.filterState.status.length > 0) {
-                if (monitor.id in this.$root.lastHeartbeatList && this.$root.lastHeartbeatList[monitor.id]) {
-                    monitor.status = this.$root.lastHeartbeatList[monitor.id].status;
+                // Check for "unknown" status filter (monitors without heartbeat)
+                if (this.filterState.status.includes("unknown")) {
+                    // Monitor is unknown if it doesn't have a heartbeat
+                    statusMatch = !(monitor.id in this.$root.lastHeartbeatList) || !this.$root.lastHeartbeatList[monitor.id];
+                } else {
+                    // Regular status filter
+                    if (monitor.id in this.$root.lastHeartbeatList && this.$root.lastHeartbeatList[monitor.id]) {
+                        monitor.status = this.$root.lastHeartbeatList[monitor.id].status;
+                        statusMatch = this.filterState.status.includes(monitor.status);
+                    } else {
+                        // No heartbeat means it doesn't match any status (except unknown)
+                        statusMatch = false;
+                    }
                 }
-                statusMatch = this.filterState.status.includes(monitor.status);
             }
 
             // filter by active

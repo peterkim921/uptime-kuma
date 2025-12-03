@@ -10,8 +10,10 @@
                     <div class="col">
                         <h3>{{ $t("Up") }}</h3>
                         <span
-                            class="num"
+                            class="num clickable"
                             :class="$root.stats.up === 0 && 'text-secondary'"
+                            @click="filterByStatus(1)"
+                            :title="$t('Click to filter monitors by status')"
                         >
                             {{ $root.stats.up }}
                         </span>
@@ -19,8 +21,10 @@
                     <div class="col">
                         <h3>{{ $t("Down") }}</h3>
                         <span
-                            class="num"
+                            class="num clickable"
                             :class="$root.stats.down > 0 ? 'text-danger' : 'text-secondary'"
+                            @click="filterByStatus(0)"
+                            :title="$t('Click to filter monitors by status')"
                         >
                             {{ $root.stats.down }}
                         </span>
@@ -28,19 +32,33 @@
                     <div class="col">
                         <h3>{{ $t("Maintenance") }}</h3>
                         <span
-                            class="num"
+                            class="num clickable"
                             :class="$root.stats.maintenance > 0 ? 'text-maintenance' : 'text-secondary'"
+                            @click="filterByStatus(3)"
+                            :title="$t('Click to filter monitors by status')"
                         >
                             {{ $root.stats.maintenance }}
                         </span>
                     </div>
                     <div class="col">
                         <h3>{{ $t("Unknown") }}</h3>
-                        <span class="num text-secondary">{{ $root.stats.unknown }}</span>
+                        <span 
+                            class="num clickable text-secondary"
+                            @click="filterByStatus(null)"
+                            :title="$t('Click to filter monitors by status')"
+                        >
+                            {{ $root.stats.unknown }}
+                        </span>
                     </div>
                     <div class="col">
                         <h3>{{ $t("pauseDashboardHome") }}</h3>
-                        <span class="num text-secondary">{{ $root.stats.pause }}</span>
+                        <span 
+                            class="num clickable text-secondary"
+                            @click="filterByPause"
+                            :title="$t('Click to filter monitors by status')"
+                        >
+                            {{ $root.stats.pause }}
+                        </span>
                     </div>
                 </div>
             </div>
@@ -108,6 +126,7 @@ import Status from "../components/Status.vue";
 import Datetime from "../components/Datetime.vue";
 import Pagination from "v-pagination-3";
 import Confirm from "../components/Confirm.vue";
+import { UP, DOWN, MAINTENANCE } from "../util.ts";
 
 export default {
     components: {
@@ -261,6 +280,23 @@ export default {
                 );
             }
         },
+        /**
+         * Filter monitors by status
+         * @param {number|null} status Status to filter by (UP=1, DOWN=0, PENDING=2, MAINTENANCE=3, null=Unknown)
+         * @returns {void}
+         */
+        filterByStatus(status) {
+            // Emit event to update MonitorList filter
+            this.$root.emitter.emit("filterMonitorByStatus", { status });
+        },
+        /**
+         * Filter monitors by pause status
+         * @returns {void}
+         */
+        filterByPause() {
+            // Emit event to update MonitorList filter for paused monitors
+            this.$root.emitter.emit("filterMonitorByPause");
+        },
     },
 };
 </script>
@@ -273,6 +309,20 @@ export default {
     color: $primary;
     font-weight: bold;
     display: block;
+}
+
+.num.clickable {
+    cursor: pointer;
+    transition: opacity 0.2s ease;
+    user-select: none;
+
+    &:hover {
+        opacity: 0.7;
+    }
+
+    &:active {
+        opacity: 0.5;
+    }
 }
 
 .shadow-box {

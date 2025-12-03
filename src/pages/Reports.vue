@@ -152,6 +152,17 @@ export default {
         }
     },
     methods: {
+        getToken() {
+            // Get token from the correct storage (localStorage or sessionStorage)
+            // Based on the socket mixin's storage() method
+            if (this.$root.storage) {
+                return this.$root.storage().token;
+            }
+            // Fallback: check both localStorage and sessionStorage
+            const remember = localStorage.getItem("remember") !== "0";
+            const storage = remember ? localStorage : sessionStorage;
+            return storage.token;
+        },
         getParams() {
             const startDate = dayjs(this.dateRange[0]).startOf('day').toISOString();
             const endDate = dayjs(this.dateRange[1]).endOf('day').toISOString();
@@ -161,7 +172,7 @@ export default {
             this.loading = true;
             this.searched = true;
             try {
-                const token = localStorage.getItem("token");
+                const token = this.getToken();
                 const headers = token ? { "Authorization": `Bearer ${token}` } : {};
                 const res = await axios.get("/api/reports/stats", { 
                     params: this.getParams(),
@@ -173,7 +184,11 @@ export default {
                     useToast().error(res.data.msg);
                 }
             } catch (error) {
-                useToast().error(error.message);
+                if (error.response && error.response.status === 401) {
+                    useToast().error(this.$t("Unauthorized. Please login again."));
+                } else {
+                    useToast().error(error.message);
+                }
             } finally {
                 this.loading = false;
             }
@@ -182,7 +197,7 @@ export default {
             this.loading = true;
             try {
                 const { startDate, endDate } = this.getParams();
-                const token = localStorage.getItem("token");
+                const token = this.getToken();
                 const headers = token ? { "Authorization": `Bearer ${token}` } : {};
                 
                 const response = await axios.get("/api/reports/export/csv", {
@@ -199,7 +214,11 @@ export default {
                 link.click();
                 link.remove();
             } catch (error) {
-                useToast().error("Export failed: " + error.message);
+                if (error.response && error.response.status === 401) {
+                    useToast().error(this.$t("Unauthorized. Please login again."));
+                } else {
+                    useToast().error("Export failed: " + error.message);
+                }
             } finally {
                 this.loading = false;
             }
@@ -216,5 +235,44 @@ export default {
 .container-fluid {
     width: 98%;
     padding-top: 20px;
+}
+
+/* 修改按钮为轻微圆角 */
+.btn {
+    border-radius: 4px !important;
+}
+
+/* 修改卡片为轻微圆角 */
+.card {
+    border-radius: 4px !important;
+}
+
+.card-header {
+    border-radius: 4px 4px 0 0 !important;
+}
+
+/* 修改徽章为轻微圆角 */
+.badge {
+    border-radius: 4px !important;
+}
+
+/* 修改警告框为轻微圆角 */
+.alert {
+    border-radius: 4px !important;
+}
+
+/* 修改日期选择器为轻微圆角 */
+:deep(.dp__input_wrap) {
+    border-radius: 4px !important;
+}
+
+:deep(.dp__input) {
+    border-radius: 4px !important;
+}
+
+/* 修改表格为轻微圆角 */
+.table {
+    border-radius: 4px;
+    overflow: hidden;
 }
 </style>
