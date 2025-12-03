@@ -18,9 +18,26 @@
                         <button class="btn btn-success me-2" @click="exportCSV" :disabled="loading">
                             <font-awesome-icon icon="file-csv" /> {{ $t("Export CSV") }}
                         </button>
-                        <button class="btn btn-danger" @click="exportPDF" :disabled="loading">
-                            <font-awesome-icon icon="file-pdf" /> {{ $t("Export PDF") }}
-                        </button>
+
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="row mb-4" v-if="stats.length > 0">
+            <div class="col-md-6">
+                <div class="card h-100">
+                    <div class="card-header">{{ $t("Average Response Time") }}</div>
+                    <div class="card-body">
+                        <Bar :data="barChartData" :options="chartOptions" />
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="card h-100">
+                    <div class="card-header">{{ $t("Overall Uptime") }}</div>
+                    <div class="card-body" style="position: relative; height: 300px;">
+                         <Pie :data="pieChartData" :options="pieOptions" />
                     </div>
                 </div>
             </div>
@@ -66,15 +83,72 @@ import '@vuepic/vue-datepicker/dist/main.css';
 import axios from "axios";
 import dayjs from "dayjs";
 import { useToast } from "vue-toastification";
+import {
+  Chart as ChartJS,
+  Title,
+  Tooltip,
+  Legend,
+  BarElement,
+  ArcElement,
+  CategoryScale,
+  LinearScale
+} from 'chart.js'
+import { Bar, Pie } from 'vue-chartjs'
+
+ChartJS.register(CategoryScale, LinearScale, BarElement, ArcElement, Title, Tooltip, Legend)
 
 export default {
-    components: { Datepicker },
+    components: { Datepicker, Bar, Pie },
     data() {
         return {
             dateRange: [dayjs().subtract(30, 'day').toDate(), dayjs().toDate()],
             stats: [],
             loading: false,
             searched: false,
+            chartOptions: {
+                responsive: true,
+                maintainAspectRatio: false,
+            },
+            pieOptions: {
+                responsive: true,
+                maintainAspectRatio: false,
+            }
+        }
+    },
+    computed: {
+        barChartData() {
+            return {
+                labels: this.stats.map(s => s.name),
+                datasets: [{
+                    label: 'Avg Ping (ms)',
+                    backgroundColor: '#5CDD8B',
+                    data: this.stats.map(s => s.avgPing)
+                }]
+            }
+        },
+        pieChartData() {
+            // Aggregate total up vs down (approximate based on uptime %)
+            // Since we don't have raw counts in the stats object for total pings, 
+            // we can visualize the distribution of monitors by status or just use the avg uptime.
+            // Better approach for Pie: Distribution of Monitors by Uptime Health
+            
+            let healthy = 0;
+            let warning = 0;
+            let down = 0;
+
+            this.stats.forEach(s => {
+                if (s.uptimePercent >= 99) healthy++;
+                else if (s.uptimePercent >= 95) warning++;
+                else down++;
+            });
+
+            return {
+                labels: ['Healthy (>=99%)', 'Warning (95-99%)', 'Critical (<95%)'],
+                datasets: [{
+                    backgroundColor: ['#5CDD8B', '#F5B617', '#DC3545'],
+                    data: [healthy, warning, down]
+                }]
+            }
         }
     },
     methods: {
@@ -130,32 +204,7 @@ export default {
                 this.loading = false;
             }
         },
-        async exportPDF() {
-            this.loading = true;
-            try {
-                const { startDate, endDate } = this.getParams();
-                const token = localStorage.getItem("token");
-                const headers = token ? { "Authorization": `Bearer ${token}` } : {};
 
-                const response = await axios.get("/api/reports/export/pdf", {
-                    params: { startDate, endDate },
-                    headers: headers,
-                    responseType: 'blob',
-                });
-                
-                const url = window.URL.createObjectURL(new Blob([response.data]));
-                const link = document.createElement('a');
-                link.href = url;
-                link.setAttribute('download', `uptime_report_${dayjs().format("YYYY-MM-DD")}.pdf`);
-                document.body.appendChild(link);
-                link.click();
-                link.remove();
-            } catch (error) {
-                useToast().error("Export failed: " + error.message);
-            } finally {
-                this.loading = false;
-            }
-        }
     },
     mounted() {
         this.fetchStats();

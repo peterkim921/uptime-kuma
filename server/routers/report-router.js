@@ -3,7 +3,7 @@ const router = express.Router();
 const { R } = require("redbean-node");
 const { checkLogin } = require("../util-server");
 const dayjs = require("dayjs");
-const puppeteer = require("puppeteer");
+
 const fs = require("fs");
 const path = require("path");
 const jwt = require("jsonwebtoken");
@@ -161,112 +161,6 @@ router.get("/export/csv", async (req, res) => {
     }
 });
 
-/**
- * Export stats as PDF
- */
-router.get("/export/pdf", async (req, res) => {
-    try {
-        const { startDate, endDate, monitorIds } = req.query;
 
-        // Fetch data (again, duplication for now)
-        let monitorIdList = [];
-        if (monitorIds) {
-            monitorIdList = monitorIds.split(",").map(id => parseInt(id));
-        } else {
-            const monitors = await R.getAll("SELECT id FROM monitor WHERE active = 1");
-            monitorIdList = monitors.map(m => m.id);
-        }
-
-        const stats = [];
-        for (const monitorId of monitorIdList) {
-            const monitor = await R.findOne("monitor", "id = ?", [monitorId]);
-            if (!monitor) continue;
-
-            const result = await R.getRow(`
-                SELECT 
-                    COUNT(*) as total_pings,
-                    SUM(CASE WHEN status = 0 THEN 1 ELSE 0 END) as downtime_count,
-                    AVG(ping) as avg_ping
-                FROM heartbeat 
-                WHERE monitor_id = ? 
-                AND time BETWEEN ? AND ?
-            `, [monitorId, startDate, endDate]);
-
-            const totalPings = result.total_pings || 0;
-            const downtimeCount = result.downtime_count || 0;
-            const avgPing = result.avg_ping || 0;
-
-            let uptimePercent = 0;
-            if (totalPings > 0) {
-                uptimePercent = ((totalPings - downtimeCount) / totalPings) * 100;
-            }
-
-            stats.push({
-                name: monitor.name,
-                uptime: uptimePercent.toFixed(2),
-                downtime: downtimeCount,
-                ping: parseFloat(avgPing.toFixed(2))
-            });
-        }
-
-        // Generate HTML for PDF
-        const htmlContent = `
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <style>
-                    body { font-family: Arial, sans-serif; padding: 20px; }
-                    h1 { text-align: center; }
-                    table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-                    th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
-                    th { background-color: #f2f2f2; }
-                    .summary { margin-bottom: 20px; }
-                </style>
-            </head>
-            <body>
-                <h1>Uptime Kuma Report</h1>
-                <div class="summary">
-                    <p><strong>Date Range:</strong> ${startDate} to ${endDate}</p>
-                    <p><strong>Generated on:</strong> ${dayjs().format("YYYY-MM-DD HH:mm:ss")}</p>
-                </div>
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Monitor Name</th>
-                            <th>Uptime (%)</th>
-                            <th>Downtime Count</th>
-                            <th>Avg Ping (ms)</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        ${stats.map(s => `
-                            <tr>
-                                <td>${s.name}</td>
-                                <td>${s.uptime}%</td>
-                                <td>${s.downtime}</td>
-                                <td>${s.ping}</td>
-                            </tr>
-                        `).join("")}
-                    </tbody>
-                </table>
-            </body>
-            </html>
-        `;
-
-        const browser = await puppeteer.launch({ headless: "new", args: ['--no-sandbox'] });
-        const page = await browser.newPage();
-        await page.setContent(htmlContent);
-        const pdfBuffer = await page.pdf({ format: "A4", printBackground: true });
-        await browser.close();
-
-        res.header("Content-Type", "application/pdf");
-        res.attachment(`uptime_report_${dayjs().format("YYYY-MM-DD")}.pdf`);
-        res.send(pdfBuffer);
-
-    } catch (error) {
-        console.error(error);
-        res.status(500).send("Error generating PDF: " + error.message);
-    }
-});
 
 module.exports = router;

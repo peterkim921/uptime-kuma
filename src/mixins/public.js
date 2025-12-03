@@ -4,11 +4,11 @@ import { getDevContainerServerHostname, isDevContainer } from "../util-frontend"
 const env = process.env.NODE_ENV || "production";
 
 // change the axios base url for development
-if (env === "development" && isDevContainer()) {
-    axios.defaults.baseURL = location.protocol + "//" + getDevContainerServerHostname();
-} else if (env === "development" || localStorage.dev === "dev") {
-    axios.defaults.baseURL = location.protocol + "//" + location.hostname + ":3001";
-}
+// if (env === "development" && isDevContainer()) {
+//     axios.defaults.baseURL = location.protocol + "//" + getDevContainerServerHostname();
+// } else if (env === "development" || localStorage.dev === "dev") {
+//     axios.defaults.baseURL = location.protocol + "//" + location.hostname + ":3001";
+// }
 
 export default {
     data() {
