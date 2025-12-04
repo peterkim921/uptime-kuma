@@ -12,8 +12,8 @@
                         <span
                             class="num clickable"
                             :class="$root.stats.up === 0 && 'text-secondary'"
-                            @click="filterByStatus(1)"
                             :title="$t('Click to filter monitors by status')"
+                            @click="filterByStatus(1)"
                         >
                             {{ $root.stats.up }}
                         </span>
@@ -23,8 +23,8 @@
                         <span
                             class="num clickable"
                             :class="$root.stats.down > 0 ? 'text-danger' : 'text-secondary'"
-                            @click="filterByStatus(0)"
                             :title="$t('Click to filter monitors by status')"
+                            @click="filterByStatus(0)"
                         >
                             {{ $root.stats.down }}
                         </span>
@@ -34,28 +34,28 @@
                         <span
                             class="num clickable"
                             :class="$root.stats.maintenance > 0 ? 'text-maintenance' : 'text-secondary'"
-                            @click="filterByStatus(3)"
                             :title="$t('Click to filter monitors by status')"
+                            @click="filterByStatus(3)"
                         >
                             {{ $root.stats.maintenance }}
                         </span>
                     </div>
                     <div class="col">
                         <h3>{{ $t("Unknown") }}</h3>
-                        <span 
+                        <span
                             class="num clickable text-secondary"
-                            @click="filterByStatus(null)"
                             :title="$t('Click to filter monitors by status')"
+                            @click="filterByStatus(null)"
                         >
                             {{ $root.stats.unknown }}
                         </span>
                     </div>
                     <div class="col">
                         <h3>{{ $t("pauseDashboardHome") }}</h3>
-                        <span 
+                        <span
                             class="num clickable text-secondary"
-                            @click="filterByPause"
                             :title="$t('Click to filter monitors by status')"
+                            @click="filterByPause"
                         >
                             {{ $root.stats.pause }}
                         </span>

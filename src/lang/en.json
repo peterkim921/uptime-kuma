@@ -636,6 +636,8 @@
     "deleteMaintenanceMsg": "Are you sure want to delete this maintenance?",
     "deleteNotificationMsg": "Are you sure want to delete this notification for all monitors?",
     "dnsPortDescription": "DNS server port. Defaults to 53. You can change the port at any time.",
+    "dnsIntervalWarning": "Setting the Heartbeat Interval below 1800 seconds (30 minutes) may let DNS server cache too much testing data . This can lead to performance issues.",
+    "dnsHostnameCannotBeIP": "DNS hostname cannot be an IP address. Please use a domain name (e.g., example.com or *.example.com).",
     "resolverserverDescription": "Cloudflare is the default server. You can change the resolver server anytime.",
     "rrtypeDescription": "Select the RR type you want to monitor",
     "pauseMonitorMsg": "Are you sure want to pause?",

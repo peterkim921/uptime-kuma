@@ -387,10 +387,13 @@
                                     v-model="monitor.hostname"
                                     type="text"
                                     class="form-control"
-                                    :pattern="`${monitor.type === 'mqtt' ? mqttIpOrHostnameRegexPattern : ipOrHostnameRegexPattern}`"
+                                    :pattern="`${monitor.type === 'dns' ? dnsHostnameOnlyPattern : monitor.type === 'mqtt' ? mqttIpOrHostnameRegexPattern : ipOrHostnameRegexPattern}`"
                                     required
                                     data-testid="hostname-input"
                                 >
+                                <div v-if="monitor.type === 'dns'" class="form-text">
+                                    {{ $t("Supports wildcard DNS testing using *.example.com format. The asterisk will be replaced with random1, random2, etc. for each check.") }}
+                                </div>
                                 <div v-if="monitor.type === 'mqtt'" class="form-text">
                                     <i18n-t tag="p" keypath="mqttHostnameTip">
                                         <template #hostnameFormat>
@@ -1273,9 +1276,10 @@ import {
     MIN_INTERVAL_SECOND,
     sleep,
 } from "../util.ts";
-import { hostNameRegexPattern, timeDurationFormatter } from "../util-frontend";
+import { hostNameRegexPattern, hostnameOnlyRegexPattern, timeDurationFormatter } from "../util-frontend";
 import HiddenInput from "../components/HiddenInput.vue";
 import EditMonitorConditions from "../components/EditMonitorConditions.vue";
+import validator from "validator";
 
 const toast = useToast();
 
@@ -1358,6 +1362,8 @@ export default {
             kafkaSaslMechanismOptions: [],
             ipOrHostnameRegexPattern: hostNameRegexPattern(),
             mqttIpOrHostnameRegexPattern: hostNameRegexPattern(true),
+            dnsHostnameOnlyPattern: hostnameOnlyRegexPattern(),
+            programmaticIntervalChange: false,
             gameList: null,
             connectionStringTemplates: {
                 "sqlserver": "Server=<hostname>,<port>;Database=<your database>;User Id=<your user id>;Password=<your password>;Encrypt=<true/false>;TrustServerCertificate=<Yes/No>;Connection Timeout=<int>",
@@ -1669,12 +1675,20 @@ message HealthCheckResponse {
         },
 
         "monitor.interval"(value, oldValue) {
-            // Link interval and retryInterval if they are the same value.
-            if (this.monitor.retryInterval === oldValue) {
+            // Link interval and retryInterval if they are the same value (only if user changed it, not programmatic)
+            if (!this.programmaticIntervalChange && this.monitor.retryInterval === oldValue) {
                 this.monitor.retryInterval = value;
             }
             // Converting monitor.interval to human readable format.
             this.monitor.humanReadableInterval = timeDurationFormatter.secondsToHumanReadableFormat(value);
+
+            // Show warning if DNS monitor interval is set below 1800 seconds (user changed it)
+            if (this.monitor.type === "dns" && oldValue !== undefined && value < 1800 && oldValue >= 1800) {
+                toast.warning(this.$t("dnsIntervalWarning"));
+            }
+
+            // Reset flag
+            this.programmaticIntervalChange = false;
         },
 
         "monitor.timeout"(value, oldValue) {
@@ -1737,11 +1751,18 @@ message HealthCheckResponse {
                 }
             }
 
+            // Set default interval for DNS monitors to avoid DNS cache issues
+            // Only set when: 1) switching from non-DNS to DNS, or 2) new monitor and DNS is selected
+            if (this.monitor.type === "dns" && oldType !== "dns") {
+                this.programmaticIntervalChange = true;
+                this.monitor.interval = 1800;
+                this.monitor.humanReadableInterval = timeDurationFormatter.secondsToHumanReadableFormat(1800);
+            }
+
             // Set default SNMP version
             if (!this.monitor.snmpVersion) {
                 this.monitor.snmpVersion = "2c";
             }
-
             // Set default jsonPath
             if (!this.monitor.jsonPath) {
                 this.monitor.jsonPath = "$";
@@ -1984,6 +2005,14 @@ message HealthCheckResponse {
                 const pattern = /^\/[A-Za-z0-9-_&()*+]*$/;
                 if (!pattern.test(this.monitor.mqttWebsocketPath)) {
                     toast.error(this.$t("mqttWebsocketPathInvalid"));
+                    return false;
+                }
+            }
+
+            // Validate DNS hostname - must be a valid FQDN (domain name), not an IP address
+            if (this.monitor.type === "dns" && this.monitor.hostname) {
+                if (!validator.isFQDN(this.monitor.hostname, { allow_wildcard: true })) {
+                    toast.error(this.$t("dnsHostnameCannotBeIP"));
                     return false;
                 }
             }

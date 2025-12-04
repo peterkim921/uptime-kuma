@@ -28,7 +28,8 @@ const checkAuth = (req, res, next) => {
         req.username = decoded.username;
         next();
     } catch (error) {
-        res.status(401).json({ ok: false, msg: "Unauthorized: " + error.message });
+        res.status(401).json({ ok: false,
+            msg: "Unauthorized: " + error.message });
     }
 };
 
@@ -46,7 +47,8 @@ router.get("/stats", async (req, res) => {
         const { startDate, endDate, monitorIds } = req.query;
 
         if (!startDate || !endDate) {
-            return res.status(400).json({ ok: false, msg: "Missing startDate or endDate" });
+            return res.status(400).json({ ok: false,
+                msg: "Missing startDate or endDate" });
         }
 
         let monitorIdList = [];
@@ -60,8 +62,10 @@ router.get("/stats", async (req, res) => {
         const stats = [];
 
         for (const monitorId of monitorIdList) {
-            const monitor = await R.findOne("monitor", "id = ?", [monitorId]);
-            if (!monitor) continue;
+            const monitor = await R.findOne("monitor", "id = ?", [ monitorId ]);
+            if (!monitor) {
+                continue;
+            }
 
             // Aggregate heartbeats
             // status: 0 = DOWN, 1 = UP
@@ -73,7 +77,7 @@ router.get("/stats", async (req, res) => {
                 FROM heartbeat 
                 WHERE monitor_id = ? 
                 AND time BETWEEN ? AND ?
-            `, [monitorId, startDate, endDate]);
+            `, [ monitorId, startDate, endDate ]);
 
             const totalPings = result.total_pings || 0;
             const downtimeCount = result.downtime_count || 0;
@@ -93,10 +97,12 @@ router.get("/stats", async (req, res) => {
             });
         }
 
-        res.json({ ok: true, stats });
+        res.json({ ok: true,
+            stats });
     } catch (error) {
         console.error(error);
-        res.status(500).json({ ok: false, msg: error.message });
+        res.status(500).json({ ok: false,
+            msg: error.message });
     }
 });
 
@@ -106,7 +112,7 @@ router.get("/stats", async (req, res) => {
 router.get("/export/csv", async (req, res) => {
     try {
         // Reuse logic or call internal function (simplified for now by duplicating logic or extracting)
-        // For brevity, I'll duplicate the aggregation logic or refactor later. 
+        // For brevity, I'll duplicate the aggregation logic or refactor later.
         // Let's copy-paste for safety in this iteration.
 
         const { startDate, endDate, monitorIds } = req.query;
@@ -126,8 +132,10 @@ router.get("/export/csv", async (req, res) => {
         let csvContent = "Monitor Name,Uptime (%),Downtime Count,Avg Ping (ms)\n";
 
         for (const monitorId of monitorIdList) {
-            const monitor = await R.findOne("monitor", "id = ?", [monitorId]);
-            if (!monitor) continue;
+            const monitor = await R.findOne("monitor", "id = ?", [ monitorId ]);
+            if (!monitor) {
+                continue;
+            }
 
             const result = await R.getRow(`
                 SELECT 
@@ -137,7 +145,7 @@ router.get("/export/csv", async (req, res) => {
                 FROM heartbeat 
                 WHERE monitor_id = ? 
                 AND time BETWEEN ? AND ?
-            `, [monitorId, startDate, endDate]);
+            `, [ monitorId, startDate, endDate ]);
 
             const totalPings = result.total_pings || 0;
             const downtimeCount = result.downtime_count || 0;
@@ -160,7 +168,5 @@ router.get("/export/csv", async (req, res) => {
         res.status(500).send("Error generating CSV");
     }
 });
-
-
 
 module.exports = router;

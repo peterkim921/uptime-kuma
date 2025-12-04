@@ -323,10 +323,10 @@ export default {
 
             if (data.status === null) {
                 // Unknown status: filter monitors without heartbeat
-                newFilter.status = ["unknown"];
+                newFilter.status = [ "unknown" ];
             } else {
                 // Regular status: filter by status value
-                newFilter.status = [data.status];
+                newFilter.status = [ data.status ];
             }
 
             // Clear active filter when filtering by status (except for pause)
@@ -344,7 +344,7 @@ export default {
             };
 
             // Filter by paused monitors (active = false)
-            newFilter.active = [false];
+            newFilter.active = [ false ];
             // Clear status filter when filtering by pause
             newFilter.status = null;
 

@@ -126,6 +126,19 @@ export function hostNameRegexPattern(mqtt = false) {
 }
 
 /**
+ * Regex pattern for hostname only (no IP addresses)
+ * Used for DNS monitor type where IP addresses should not be allowed
+ * Supports wildcard hostnames starting with * (e.g., *.example.com)
+ * @returns {string} The hostname-only regex pattern
+ */
+export function hostnameOnlyRegexPattern() {
+    // Source: https://stackoverflow.com/questions/106179/regular-expression-to-match-dns-hostname-or-ip-address
+    // Modified to only accept hostnames, not IP addresses
+    // Also allows wildcard hostnames starting with *
+    return "^(\\*\\.)?([a-zA-Z0-9])?(([a-zA-Z0-9_]|[a-zA-Z0-9_][a-zA-Z0-9\\-_]*[a-zA-Z0-9_])\\.)*([A-Za-z0-9_]|[A-Za-z0-9_][A-Za-z0-9\\-_]*[A-Za-z0-9_])(\\.)?$";
+}
+
+/**
  * Get the tag color options
  * Shared between components
  * @param {any} self Component

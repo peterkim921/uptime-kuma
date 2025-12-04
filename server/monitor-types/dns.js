@@ -7,6 +7,7 @@ const { ConditionVariable } = require("../monitor-conditions/variables");
 const { defaultStringOperators } = require("../monitor-conditions/operators");
 const { ConditionExpressionGroup } = require("../monitor-conditions/expression");
 const { evaluateExpressionGroup } = require("../monitor-conditions/evaluator");
+const validator = require("validator");
 
 class DnsMonitorType extends MonitorType {
     name = "dns";
@@ -21,11 +22,39 @@ class DnsMonitorType extends MonitorType {
      * @inheritdoc
      */
     async check(monitor, heartbeat, _server) {
+        // Validate that hostname is a valid FQDN (Fully Qualified Domain Name)
+        // allow_wildcard: true allows hostnames like *.example.com
+        if (!validator.isFQDN(monitor.hostname, { allow_wildcard: true })) {
+            throw new Error("Hostname must be a valid domain name (e.g., example.com or *.example.com). IP addresses are not allowed.");
+        }
+
+        // Handle wildcard hostname (e.g., *.example.com)
+        let actualHostname = monitor.hostname;
+        if (monitor.hostname && monitor.hostname.startsWith("*")) {
+            // Get or initialize wildcard counter
+            if (!monitor.wildcardCounter) {
+                monitor.wildcardCounter = 1;
+            }
+            // Replace * with random<counter>
+            actualHostname = monitor.hostname.replace(/^\*/, `random${monitor.wildcardCounter}`);
+
+            // Log the wildcard replacement for debugging
+            console.log(`[DNS Monitor #${monitor.id}] Wildcard hostname: ${monitor.hostname} -> ${actualHostname} (test #${monitor.wildcardCounter})`);
+
+            // Increment counter for next check
+            monitor.wildcardCounter++;
+        }
+
         let startTime = dayjs().valueOf();
         let dnsMessage = "";
 
-        let dnsRes = await dnsResolve(monitor.hostname, monitor.dns_resolve_server, monitor.port, monitor.dns_resolve_type);
+        let dnsRes = await dnsResolve(actualHostname, monitor.dns_resolve_server, monitor.port, monitor.dns_resolve_type);
         heartbeat.ping = dayjs().valueOf() - startTime;
+
+        // If wildcard was used, include it in the message
+        if (actualHostname !== monitor.hostname) {
+            dnsMessage = `[${actualHostname}] `;
+        }
 
         const conditions = ConditionExpressionGroup.fromMonitor(monitor);
         let conditionsResult = true;
@@ -35,22 +64,22 @@ class DnsMonitorType extends MonitorType {
             case "A":
             case "AAAA":
             case "PTR":
-                dnsMessage = `Records: ${dnsRes.join(" | ")}`;
+                dnsMessage += `Records: ${dnsRes.join(" | ")}`;
                 conditionsResult = dnsRes.some(record => handleConditions({ record }));
                 break;
 
             case "TXT":
-                dnsMessage = `Records: ${dnsRes.join(" | ")}`;
+                dnsMessage += `Records: ${dnsRes.join(" | ")}`;
                 conditionsResult = dnsRes.flat().some(record => handleConditions({ record }));
                 break;
 
             case "CNAME":
-                dnsMessage = dnsRes[0];
+                dnsMessage += dnsRes[0];
                 conditionsResult = handleConditions({ record: dnsRes[0] });
                 break;
 
             case "CAA":
-                dnsMessage = dnsRes[0].issue;
+                dnsMessage += dnsRes[0].issue;
                 conditionsResult = handleConditions({ record: dnsRes[0].issue });
                 break;
 
