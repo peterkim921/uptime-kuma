@@ -953,6 +953,75 @@
                                 {{ $t("Setup Notification") }}
                             </button>
 
+                            <!-- Notification Rules (Time-based routing) -->
+                            <h2 class="mt-5 mb-2">{{ $t("Notification Rules") }}</h2>
+                            <div class="form-text mb-3">
+                                {{ $t("notificationRulesDescription") }}
+                            </div>
+                            <div class="form-check form-switch my-3">
+                                <input id="enable-notification-rules" v-model="enableNotificationRules" class="form-check-input" type="checkbox">
+                                <label class="form-check-label" for="enable-notification-rules">
+                                    {{ $t("Enable Time-based Notification Routing") }}
+                                </label>
+                            </div>
+
+                            <div v-if="enableNotificationRules" class="notification-rules-container">
+                                <div v-for="(rule, index) in monitor.notificationRules" :key="index" class="card mb-3 notification-rule-card">
+                                    <div class="card-body">
+                                        <div class="d-flex justify-content-between align-items-center mb-3">
+                                            <h5 class="mb-0">{{ $t("Rule") }} {{ index + 1 }}</h5>
+                                            <button type="button" class="btn btn-sm btn-danger" @click="removeNotificationRule(index)">
+                                                {{ $t("Remove") }}
+                                            </button>
+                                        </div>
+                                        <div class="row">
+                                            <div class="col-md-6 mb-3">
+                                                <label :for="'rule-duration-' + index" class="form-label">
+                                                    {{ $t("Duration (seconds)") }}
+                                                </label>
+                                                <input 
+                                                    :id="'rule-duration-' + index" 
+                                                    v-model.number="rule.duration" 
+                                                    type="number" 
+                                                    class="form-control notification-rule-input" 
+                                                    min="0" 
+                                                    step="1"
+                                                    :placeholder="$t('After X seconds of downtime')"
+                                                >
+                                                <div class="form-text">
+                                                    {{ $t("notificationRuleDurationHelp") }}
+                                                </div>
+                                            </div>
+                                            <div class="col-md-6 mb-3">
+                                                <label :for="'rule-notification-' + index" class="form-label">
+                                                    {{ $t("Notification") }}
+                                                </label>
+                                                <select 
+                                                    :id="'rule-notification-' + index" 
+                                                    v-model.number="rule.notificationId" 
+                                                    class="form-select notification-rule-select"
+                                                >
+                                                    <option :value="null">{{ $t("Select a notification") }}</option>
+                                                    <option 
+                                                        v-for="notification in $root.notificationList" 
+                                                        :key="notification.id" 
+                                                        :value="notification.id"
+                                                    >
+                                                        {{ notification.name }}
+                                                    </option>
+                                                </select>
+                                                <div class="form-text">
+                                                    {{ $t("Select a notification for this rule") }}
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <button type="button" class="btn btn-success notification-rule-btn" @click="addNotificationRule">
+                                    <font-awesome-icon icon="plus" /> {{ $t("Add Rule") }}
+                                </button>
+                            </div>
+
                             <!-- Proxies -->
                             <div v-if="monitor.type === 'http' || monitor.type === 'keyword' || monitor.type === 'json-query'">
                                 <h2 class="mt-5 mb-2">{{ $t("Proxy") }}</h2>
@@ -1299,6 +1368,7 @@ const monitorDefaults = {
     resendInterval: 0,
     maxretries: 0,
     notificationIDList: {},
+    notificationRules: [],
     ignoreTls: false,
     upsideDown: false,
     expiryNotification: false,
@@ -1374,6 +1444,7 @@ export default {
             },
             draftGroupName: null,
             remoteBrowsersEnabled: false,
+            enableNotificationRules: false,
         };
     },
 
@@ -1874,7 +1945,9 @@ message HealthCheckResponse {
                     ping_numeric: true,
                     packetSize: 56,
                     ping_per_request_timeout: 2,
+                    notificationRules: [],
                 };
+                this.enableNotificationRules = false;
 
                 if (this.$root.proxyList && !this.monitor.proxyId) {
                     const proxy = this.$root.proxyList.find(proxy => proxy.default);
@@ -1901,6 +1974,42 @@ message HealthCheckResponse {
                         }
 
                         this.monitor = res.monitor;
+
+                        // Parse notification_rules if present
+                        if (this.monitor.notification_rules) {
+                            try {
+                                const parsed = JSON.parse(this.monitor.notification_rules);
+                                // Convert old format (notificationIds array) to new format (notificationId single value)
+                                if (Array.isArray(parsed)) {
+                                    this.monitor.notificationRules = parsed.map(rule => {
+                                        // Support both old format (notificationIds array) and new format (notificationId)
+                                        if (rule.notificationIds && Array.isArray(rule.notificationIds) && rule.notificationIds.length > 0) {
+                                            // Old format: use first notification ID
+                                            return {
+                                                duration: rule.duration || 0,
+                                                notificationId: Number(rule.notificationIds[0])
+                                            };
+                                        } else {
+                                            // New format: single notificationId
+                                            return {
+                                                duration: rule.duration || 0,
+                                                notificationId: rule.notificationId ? Number(rule.notificationId) : null
+                                            };
+                                        }
+                                    });
+                                } else {
+                                    this.monitor.notificationRules = [];
+                                }
+                                this.enableNotificationRules = this.monitor.notificationRules && this.monitor.notificationRules.length > 0;
+                            } catch (e) {
+                                console.error("Failed to parse notification_rules:", e);
+                                this.monitor.notificationRules = [];
+                                this.enableNotificationRules = false;
+                            }
+                        } else {
+                            this.monitor.notificationRules = [];
+                            this.enableNotificationRules = false;
+                        }
 
                         if (this.isClone) {
                             /*
@@ -2063,6 +2172,27 @@ message HealthCheckResponse {
                 this.monitor.url = this.monitor.url.trim();
             }
 
+            // Serialize notification rules
+            if (this.enableNotificationRules && this.monitor.notificationRules && this.monitor.notificationRules.length > 0) {
+                // Filter out invalid rules (no notificationId or invalid duration)
+                const validRules = this.monitor.notificationRules.filter(rule => 
+                    rule.notificationId !== null && 
+                    rule.notificationId !== undefined &&
+                    typeof rule.duration === 'number' && 
+                    rule.duration >= 0
+                ).map(rule => ({
+                    duration: rule.duration,
+                    notificationId: Number(rule.notificationId)
+                }));
+                if (validRules.length > 0) {
+                    this.monitor.notification_rules = JSON.stringify(validRules);
+                } else {
+                    this.monitor.notification_rules = null;
+                }
+            } else {
+                this.monitor.notification_rules = null;
+            }
+
             let createdNewParent = false;
 
             if (this.draftGroupName && this.monitor.parent === -1) {
@@ -2144,6 +2274,32 @@ message HealthCheckResponse {
          */
         addedProxy(id) {
             this.monitor.proxyId = id;
+        },
+
+        /**
+         * Add a new notification rule
+         * @returns {void}
+         */
+        addNotificationRule() {
+            if (!this.monitor.notificationRules) {
+                this.monitor.notificationRules = [];
+            }
+            this.monitor.notificationRules.push({
+                duration: 0,
+                notificationId: null
+            });
+        },
+
+        /**
+         * Remove a notification rule
+         * @param {number} index Index of rule to remove
+         * @returns {void}
+         */
+        removeNotificationRule(index) {
+            this.monitor.notificationRules.splice(index, 1);
+            if (this.monitor.notificationRules.length === 0) {
+                this.enableNotificationRules = false;
+            }
         },
 
         /**
@@ -2230,5 +2386,21 @@ message HealthCheckResponse {
 
     textarea {
         min-height: 200px;
+    }
+
+    .notification-rules-container {
+        .notification-rule-card {
+            border-radius: 8px;
+            overflow: hidden;
+        }
+
+        .notification-rule-input,
+        .notification-rule-select {
+            border-radius: 6px;
+        }
+
+        .notification-rule-btn {
+            border-radius: 6px;
+        }
     }
 </style>

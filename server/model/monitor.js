@@ -163,6 +163,7 @@ class Monitor extends BeanModel {
             rabbitmqNodes: JSON.parse(this.rabbitmqNodes),
             conditions: JSON.parse(this.conditions),
             ipFamily: this.ipFamily,
+            notification_rules: this.notification_rules,
 
             // ping advanced options
             ping_numeric: this.isPingNumeric(),
@@ -887,9 +888,15 @@ class Monitor extends BeanModel {
                     bean.msg = error.message;
                 }
 
-                // If UP come in here, it must be upside down mode
-                // Just reset the retries
-                if (this.isUpsideDown() && bean.status === UP) {
+                // Handle upside down mode: when service is actually UP, it's flipped to DOWN
+                // and an error "Flip UP to DOWN" is thrown. We need to handle this case.
+                if (this.isUpsideDown() && error.message === "Flip UP to DOWN") {
+                    // Service is actually UP, but we want to show it as DOWN in upside down mode
+                    bean.status = DOWN;
+                    retries = 0;
+                } else if (this.isUpsideDown() && bean.status === UP) {
+                    // If UP come in here, it must be upside down mode
+                    // Just reset the retries
                     retries = 0;
 
                 } else if ((this.maxretries > 0) && (retries < this.maxretries)) {
@@ -898,6 +905,10 @@ class Monitor extends BeanModel {
                 } else {
                     // Continue counting retries during DOWN
                     retries++;
+                    // Ensure status is set to DOWN if not already set
+                    if (bean.status !== PENDING && bean.status !== MAINTENANCE) {
+                        bean.status = DOWN;
+                    }
                 }
             }
 
@@ -1303,7 +1314,7 @@ class Monitor extends BeanModel {
      */
     static async sendNotification(isFirstBeat, monitor, bean) {
         if (!isFirstBeat || bean.status === DOWN) {
-            const notificationList = await Monitor.getNotificationList(monitor);
+            const notificationList = await Monitor.getNotificationList(monitor, bean);
 
             let text;
             if (bean.status === UP) {
@@ -1342,11 +1353,125 @@ class Monitor extends BeanModel {
     }
 
     /**
+     * Get the first down heartbeat time for a monitor to calculate down duration
+     * @param {number} monitorID ID of monitor
+     * @param {Bean} currentBean Current heartbeat bean
+     * @returns {Promise<number|null>} Duration in seconds since first down, or null if not down
+     */
+    static async getDownDuration(monitorID, currentBean) {
+        if (currentBean.status !== DOWN) {
+            return null;
+        }
+
+        // Find the first down heartbeat in the current down sequence
+        // We need to find the heartbeat where status changed from UP/PENDING to DOWN
+        const firstDownHeartbeat = await R.findOne(`
+            SELECT time, status FROM heartbeat 
+            WHERE monitor_id = ? 
+            AND time <= ?
+            AND status = ?
+            ORDER BY time ASC
+            LIMIT 1
+        `, [monitorID, currentBean.time, DOWN]);
+
+        if (!firstDownHeartbeat) {
+            return null;
+        }
+
+        // Check if there's an UP heartbeat after this down heartbeat
+        // If yes, this is not the start of current down sequence
+        const upAfterDown = await R.findOne(`
+            SELECT time FROM heartbeat 
+            WHERE monitor_id = ? 
+            AND time > ?
+            AND time <= ?
+            AND status = ?
+            ORDER BY time ASC
+            LIMIT 1
+        `, [monitorID, firstDownHeartbeat.time, currentBean.time, UP]);
+
+        if (upAfterDown) {
+            // There was an UP between firstDownHeartbeat and current, so current down started after upAfterDown
+            // Find the first down after the last UP
+            const firstDownAfterUp = await R.findOne(`
+                SELECT time FROM heartbeat 
+                WHERE monitor_id = ? 
+                AND time > ?
+                AND time <= ?
+                AND status = ?
+                ORDER BY time ASC
+                LIMIT 1
+            `, [monitorID, upAfterDown.time, currentBean.time, DOWN]);
+
+            if (firstDownAfterUp) {
+                return dayjs(currentBean.time).diff(dayjs(firstDownAfterUp.time), "second");
+            }
+        }
+
+        return dayjs(currentBean.time).diff(dayjs(firstDownHeartbeat.time), "second");
+    }
+
+    /**
      * Get list of notification providers for a given monitor
      * @param {Monitor} monitor Monitor to get notification providers for
+     * @param {Bean|null} bean Current heartbeat bean (optional, for time-based notification rules)
      * @returns {Promise<LooseObject<any>[]>} List of notifications
      */
-    static async getNotificationList(monitor) {
+    static async getNotificationList(monitor, bean = null) {
+        // Check if notification rules are configured
+        let notificationRules = null;
+        if (monitor.notification_rules) {
+            try {
+                notificationRules = JSON.parse(monitor.notification_rules);
+            } catch (e) {
+                log.error("monitor", `Failed to parse notification_rules for monitor ${monitor.id}: ${e.message}`);
+            }
+        }
+
+        // If notification rules are configured and we have a bean with DOWN status, use time-based routing
+        if (notificationRules && Array.isArray(notificationRules) && notificationRules.length > 0 && bean && bean.status === DOWN) {
+            const downDuration = await Monitor.getDownDuration(monitor.id, bean);
+            
+            if (downDuration !== null) {
+                // Sort rules by duration (ascending) to find the matching rule
+                const sortedRules = [...notificationRules].sort((a, b) => (a.duration || 0) - (b.duration || 0));
+                
+                // Find the rule that matches the current down duration
+                // Use the rule with the highest duration that is <= current down duration
+                let matchingRule = null;
+                for (const rule of sortedRules) {
+                    if (downDuration >= (rule.duration || 0)) {
+                        matchingRule = rule;
+                    } else {
+                        break;
+                    }
+                }
+
+                // Support both old format (notificationIds array) and new format (notificationId single value)
+                let notificationIdToUse = null;
+                if (matchingRule.notificationId !== null && matchingRule.notificationId !== undefined) {
+                    // New format: single notificationId
+                    notificationIdToUse = matchingRule.notificationId;
+                } else if (matchingRule.notificationIds && Array.isArray(matchingRule.notificationIds) && matchingRule.notificationIds.length > 0) {
+                    // Old format: use first notification ID from array
+                    notificationIdToUse = matchingRule.notificationIds[0];
+                }
+
+                if (notificationIdToUse !== null) {
+                    // Return only the notification specified in the matching rule
+                    let notificationList = await R.getAll(
+                        `SELECT notification.* FROM notification, monitor_notification 
+                        WHERE monitor_id = ? 
+                        AND monitor_notification.notification_id = notification.id 
+                        AND notification.id = ?`,
+                        [monitor.id, notificationIdToUse]
+                    );
+                    return notificationList;
+                }
+            }
+        }
+
+        // Default behavior: return all notifications for this monitor
         let notificationList = await R.getAll("SELECT notification.* FROM notification, monitor_notification WHERE monitor_id = ? AND monitor_notification.notification_id = notification.id ", [
             monitor.id,
         ]);

@@ -904,6 +904,7 @@ let needSetup = false;
                 bean.rabbitmqPassword = monitor.rabbitmqPassword;
                 bean.conditions = JSON.stringify(monitor.conditions);
                 bean.manual_status = monitor.manual_status;
+                bean.notification_rules = monitor.notification_rules || null;
 
                 // ping advanced options
                 bean.ping_numeric = monitor.ping_numeric;
