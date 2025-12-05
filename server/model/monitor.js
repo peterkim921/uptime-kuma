@@ -168,6 +168,9 @@ class Monitor extends BeanModel {
             ping_numeric: this.isPingNumeric(),
             ping_count: this.ping_count,
             ping_per_request_timeout: this.ping_per_request_timeout,
+
+            // dependencies
+            dependencies: (preloadData.dependencies && preloadData.dependencies.get(this.id)) || [],
         };
 
         if (includeSensitiveData) {
@@ -1557,6 +1560,7 @@ class Monitor extends BeanModel {
         const activeStatusMap = new Map();
         const forceInactiveMap = new Map();
         const pathsMap = new Map();
+        const dependenciesMap = new Map();
 
         if (monitorData.length > 0) {
             const monitorIDs = monitorData.map(monitor => monitor.id);
@@ -1567,6 +1571,7 @@ class Monitor extends BeanModel {
             const activeStatuses = await Promise.all(monitorData.map(monitor => Monitor.isActive(monitor.id, monitor.active)));
             const forceInactiveStatuses = await Promise.all(monitorData.map(monitor => Monitor.isParentActive(monitor.id)));
             const paths = await Promise.all(monitorData.map(monitor => Monitor.getAllPath(monitor.id, monitor.name)));
+            const dependencies = await Promise.all(monitorData.map(monitor => Monitor.getDependencies(monitor.id)));
 
             notifications.forEach(row => {
                 if (!notificationsMap.has(row.monitor_id)) {
@@ -1607,6 +1612,10 @@ class Monitor extends BeanModel {
             monitorData.forEach((monitor, index) => {
                 pathsMap.set(monitor.id, paths[index]);
             });
+
+            monitorData.forEach((monitor, index) => {
+                dependenciesMap.set(monitor.id, dependencies[index]);
+            });
         }
 
         return {
@@ -1617,6 +1626,7 @@ class Monitor extends BeanModel {
             activeStatus: activeStatusMap,
             forceInactive: forceInactiveMap,
             paths: pathsMap,
+            dependencies: dependenciesMap,
         };
     }
 
@@ -1799,6 +1809,195 @@ class Monitor extends BeanModel {
             log.debug("monitor", `[${this.name}] call checkCertExpiryNotifications`);
             await this.checkCertExpiryNotifications(tlsInfo);
         }
+    }
+
+    /**
+     * Get all monitors that this monitor depends on
+     * @param {number} monitorID ID of monitor to get dependencies for
+     * @returns {Promise<LooseObject<any>[]>} List of monitors this monitor depends on
+     */
+    static async getDependencies(monitorID) {
+        return await R.getAll(`
+            SELECT 
+                md.id as dependency_id,
+                md.relation_type,
+                m.id,
+                m.name,
+                m.type,
+                m.active,
+                h.status,
+                h.msg
+            FROM monitor_dependency md
+            JOIN monitor m ON md.depends_on_monitor_id = m.id
+            LEFT JOIN (
+                SELECT monitor_id, status, msg
+                FROM heartbeat
+                WHERE id IN (
+                    SELECT MAX(id) FROM heartbeat GROUP BY monitor_id
+                )
+            ) h ON m.id = h.monitor_id
+            WHERE md.monitor_id = ?
+            ORDER BY m.name
+        `, [ monitorID ]);
+    }
+
+    /**
+     * Get all monitors that depend on this monitor
+     * @param {number} monitorID ID of monitor to get dependents for
+     * @returns {Promise<LooseObject<any>[]>} List of monitors that depend on this monitor
+     */
+    static async getDependents(monitorID) {
+        return await R.getAll(`
+            SELECT 
+                md.id as dependency_id,
+                md.relation_type,
+                m.id,
+                m.name,
+                m.type,
+                m.active,
+                h.status,
+                h.msg
+            FROM monitor_dependency md
+            JOIN monitor m ON md.monitor_id = m.id
+            LEFT JOIN (
+                SELECT monitor_id, status, msg
+                FROM heartbeat
+                WHERE id IN (
+                    SELECT MAX(id) FROM heartbeat GROUP BY monitor_id
+                )
+            ) h ON m.id = h.monitor_id
+            WHERE md.depends_on_monitor_id = ?
+            ORDER BY m.name
+        `, [ monitorID ]);
+    }
+
+    /**
+     * Add a dependency relationship
+     * @param {number} monitorID ID of monitor that depends on another
+     * @param {number} dependsOnMonitorID ID of monitor being depended on
+     * @param {string} relationType Type of dependency (hard/soft)
+     * @returns {Promise<void>}
+     */
+    static async addDependency(monitorID, dependsOnMonitorID, relationType = "hard") {
+        // Prevent self-dependency
+        if (monitorID === dependsOnMonitorID) {
+            throw new Error("A monitor cannot depend on itself");
+        }
+
+        // Check for circular dependency
+        const wouldCreateCycle = await Monitor.wouldCreateCircularDependency(monitorID, dependsOnMonitorID);
+        if (wouldCreateCycle) {
+            throw new Error("This dependency would create a circular dependency");
+        }
+
+        // Check if dependency already exists
+        const existing = await R.findOne("monitor_dependency", 
+            "monitor_id = ? AND depends_on_monitor_id = ?", 
+            [ monitorID, dependsOnMonitorID ]);
+        
+        if (existing) {
+            // Update existing dependency
+            existing.relation_type = relationType;
+            await R.store(existing);
+        } else {
+            // Create new dependency
+            const dependency = R.dispense("monitor_dependency");
+            dependency.monitor_id = monitorID;
+            dependency.depends_on_monitor_id = dependsOnMonitorID;
+            dependency.relation_type = relationType;
+            await R.store(dependency);
+        }
+    }
+
+    /**
+     * Remove a dependency relationship
+     * @param {number} monitorID ID of monitor that depends on another
+     * @param {number} dependsOnMonitorID ID of monitor being depended on
+     * @returns {Promise<void>}
+     */
+    static async removeDependency(monitorID, dependsOnMonitorID) {
+        await R.exec(
+            "DELETE FROM monitor_dependency WHERE monitor_id = ? AND depends_on_monitor_id = ?",
+            [ monitorID, dependsOnMonitorID ]
+        );
+    }
+
+    /**
+     * Remove all dependencies for a monitor
+     * @param {number} monitorID ID of monitor to remove dependencies for
+     * @returns {Promise<void>}
+     */
+    static async removeAllDependencies(monitorID) {
+        await R.exec(
+            "DELETE FROM monitor_dependency WHERE monitor_id = ? OR depends_on_monitor_id = ?",
+            [ monitorID, monitorID ]
+        );
+    }
+
+    /**
+     * Check if adding a dependency would create a circular dependency
+     * @param {number} monitorID ID of monitor that would depend on another
+     * @param {number} dependsOnMonitorID ID of monitor being depended on
+     * @returns {Promise<boolean>} True if it would create a cycle
+     */
+    static async wouldCreateCircularDependency(monitorID, dependsOnMonitorID) {
+        // If the target monitor already depends on this monitor (directly or indirectly),
+        // adding this dependency would create a cycle
+        const visited = new Set();
+        const toVisit = [ dependsOnMonitorID ];
+
+        while (toVisit.length > 0) {
+            const currentID = toVisit.shift();
+            
+            if (currentID === monitorID) {
+                return true; // Found a path back to monitorID, cycle detected
+            }
+
+            if (visited.has(currentID)) {
+                continue; // Already visited this node
+            }
+
+            visited.add(currentID);
+
+            // Get all monitors that currentID depends on
+            const dependencies = await R.getAll(
+                "SELECT depends_on_monitor_id FROM monitor_dependency WHERE monitor_id = ?",
+                [ currentID ]
+            );
+
+            for (const dep of dependencies) {
+                toVisit.push(dep.depends_on_monitor_id);
+            }
+        }
+
+        return false; // No cycle detected
+    }
+
+    /**
+     * Get dependency status for a monitor (whether any dependencies are down)
+     * This helps determine if a monitor is down due to its dependencies
+     * @param {number} monitorID ID of monitor to check
+     * @returns {Promise<LooseObject<any>>} Dependency status information
+     */
+    static async getDependencyStatus(monitorID) {
+        const dependencies = await Monitor.getDependencies(monitorID);
+        const downDependencies = dependencies.filter(dep => dep.status === DOWN || dep.status === PENDING);
+        const allDependenciesUp = downDependencies.length === 0;
+
+        return {
+            hasDependencies: dependencies.length > 0,
+            totalDependencies: dependencies.length,
+            downDependencies: downDependencies.length,
+            allDependenciesUp,
+            dependencies: dependencies.map(dep => ({
+                id: dep.id,
+                name: dep.name,
+                type: dep.type,
+                status: dep.status,
+                relationType: dep.relation_type,
+                msg: dep.msg
+            }))
+        };
     }
 }
 

@@ -1150,6 +1150,113 @@ let needSetup = false;
             }
         });
 
+        // Add monitor dependency
+        socket.on("addMonitorDependency", async (monitorID, dependsOnMonitorID, relationType, callback) => {
+            try {
+                checkLogin(socket);
+
+                // Verify ownership of both monitors
+                const monitor = await R.findOne("monitor", " id = ? AND user_id = ? ", [
+                    monitorID,
+                    socket.userID,
+                ]);
+                if (!monitor) {
+                    throw new Error("Monitor not found or permission denied");
+                }
+
+                const dependsOnMonitor = await R.findOne("monitor", " id = ? AND user_id = ? ", [
+                    dependsOnMonitorID,
+                    socket.userID,
+                ]);
+                if (!dependsOnMonitor) {
+                    throw new Error("Dependency monitor not found or permission denied");
+                }
+
+                await Monitor.addDependency(monitorID, dependsOnMonitorID, relationType || "hard");
+
+                // Update monitor list to reflect dependency changes
+                await server.sendUpdateMonitorIntoList(socket, monitorID);
+                await server.sendUpdateMonitorIntoList(socket, dependsOnMonitorID);
+
+                callback({
+                    ok: true,
+                    msg: "Dependency added successfully",
+                });
+
+            } catch (e) {
+                callback({
+                    ok: false,
+                    msg: e.message,
+                });
+            }
+        });
+
+        // Remove monitor dependency
+        socket.on("removeMonitorDependency", async (monitorID, dependsOnMonitorID, callback) => {
+            try {
+                checkLogin(socket);
+
+                // Verify ownership
+                const monitor = await R.findOne("monitor", " id = ? AND user_id = ? ", [
+                    monitorID,
+                    socket.userID,
+                ]);
+                if (!monitor) {
+                    throw new Error("Monitor not found or permission denied");
+                }
+
+                await Monitor.removeDependency(monitorID, dependsOnMonitorID);
+
+                // Update monitor list to reflect dependency changes
+                await server.sendUpdateMonitorIntoList(socket, monitorID);
+                await server.sendUpdateMonitorIntoList(socket, dependsOnMonitorID);
+
+                callback({
+                    ok: true,
+                    msg: "Dependency removed successfully",
+                });
+
+            } catch (e) {
+                callback({
+                    ok: false,
+                    msg: e.message,
+                });
+            }
+        });
+
+        // Get monitor dependencies
+        socket.on("getMonitorDependencies", async (monitorID, callback) => {
+            try {
+                checkLogin(socket);
+
+                // Verify ownership
+                const monitor = await R.findOne("monitor", " id = ? AND user_id = ? ", [
+                    monitorID,
+                    socket.userID,
+                ]);
+                if (!monitor) {
+                    throw new Error("Monitor not found or permission denied");
+                }
+
+                const dependencies = await Monitor.getDependencies(monitorID);
+                const dependents = await Monitor.getDependents(monitorID);
+                const dependencyStatus = await Monitor.getDependencyStatus(monitorID);
+
+                callback({
+                    ok: true,
+                    dependencies,
+                    dependents,
+                    dependencyStatus,
+                });
+
+            } catch (e) {
+                callback({
+                    ok: false,
+                    msg: e.message,
+                });
+            }
+        });
+
         socket.on("getTags", async (callback) => {
             try {
                 checkLogin(socket);
