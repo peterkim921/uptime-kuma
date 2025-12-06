@@ -953,6 +953,43 @@
                                 {{ $t("Setup Notification") }}
                             </button>
 
+                            <h2 class="mt-5 mb-2">{{ $t("Notification Rules") }}</h2>
+                            <div class="my-3">
+                                <button class="btn btn-outline-primary" type="button" @click="addNotificationRule">
+                                    <font-awesome-icon icon="plus" /> {{ $t("Add Rule") }}
+                                </button>
+                            </div>
+
+                            <div v-for="(rule, index) in monitor.notificationRules" :key="index" class="card mb-3">
+                                <div class="card-body">
+                                    <div class="row">
+                                        <div class="col-md-4">
+                                            <label class="form-label">{{ $t("Delay (seconds)") }}</label>
+                                            <input v-model.number="rule.delay" type="number" class="form-control" min="0">
+                                        </div>
+                                        <div class="col-md-8">
+                                            <label class="form-label">{{ $t("Notifications") }}</label>
+                                            <VueMultiselect
+                                                v-model="rule.selectedNotifications"
+                                                :options="$root.notificationList"
+                                                :multiple="true"
+                                                :close-on-select="false"
+                                                :clear-on-select="false"
+                                                :preserve-search="true"
+                                                placeholder="Select Notifications"
+                                                label="name"
+                                                track-by="id"
+                                            />
+                                        </div>
+                                    </div>
+                                    <div class="mt-2 text-end">
+                                        <button class="btn btn-danger btn-sm" type="button" @click="removeNotificationRule(index)">
+                                            {{ $t("Remove") }}
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+
                             <!-- Proxies -->
                             <div v-if="monitor.type === 'http' || monitor.type === 'keyword' || monitor.type === 'json-query'">
                                 <h2 class="mt-5 mb-2">{{ $t("Proxy") }}</h2>
@@ -1873,7 +1910,9 @@ message HealthCheckResponse {
                     ping_count: 3,
                     ping_numeric: true,
                     packetSize: 56,
+                    packetSize: 56,
                     ping_per_request_timeout: 2,
+                    notificationRules: [],
                 };
 
                 if (this.$root.proxyList && !this.monitor.proxyId) {
@@ -1901,6 +1940,22 @@ message HealthCheckResponse {
                         }
 
                         this.monitor = res.monitor;
+
+                        if (this.monitor.notificationRules) {
+                            for (const rule of this.monitor.notificationRules) {
+                                rule.selectedNotifications = [];
+                                for (const notificationID in rule.notificationIDList) {
+                                    if (rule.notificationIDList[notificationID]) {
+                                         const notification = this.$root.notificationList.find(n => n.id == notificationID);
+                                         if (notification) {
+                                             rule.selectedNotifications.push(notification);
+                                         }
+                                    }
+                                }
+                            }
+                        } else {
+                            this.monitor.notificationRules = [];
+                        }
 
                         if (this.isClone) {
                             /*
@@ -1959,6 +2014,22 @@ message HealthCheckResponse {
 
         addRabbitmqNode(newNode) {
             this.monitor.rabbitmqNodes.push(newNode);
+        },
+
+        addNotificationRule() {
+            if (!this.monitor.notificationRules) {
+                this.monitor.notificationRules = [];
+            }
+            this.monitor.notificationRules.push({
+                delay: 30,
+                active: true,
+                selectedNotifications: [],
+                notificationIDList: {},
+            });
+        },
+
+        removeNotificationRule(index) {
+            this.monitor.notificationRules.splice(index, 1);
         },
 
         /**
@@ -2031,6 +2102,17 @@ message HealthCheckResponse {
         async submit() {
 
             this.processing = true;
+
+            if (this.monitor.notificationRules) {
+                for (const rule of this.monitor.notificationRules) {
+                    rule.notificationIDList = {};
+                    if (rule.selectedNotifications) {
+                        for (const notification of rule.selectedNotifications) {
+                            rule.notificationIDList[notification.id] = true;
+                        }
+                    }
+                }
+            }
 
             if (!this.monitor.name) {
                 this.monitor.name = this.defaultFriendlyName;

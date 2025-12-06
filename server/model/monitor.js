@@ -129,6 +129,7 @@ class Monitor extends BeanModel {
             docker_host: this.docker_host,
             proxyId: this.proxy_id,
             notificationIDList: preloadData.notifications.get(this.id) || {},
+            notificationRules: preloadData.notificationRules?.get(this.id) || [],
             tags: preloadData.tags.get(this.id) || [],
             maintenance: preloadData.maintenanceStatus.get(this.id),
             mqttTopic: this.mqttTopic,
@@ -214,7 +215,7 @@ class Monitor extends BeanModel {
      * monitor
      */
     async getTags() {
-        return await R.getAll("SELECT mt.*, tag.name, tag.color FROM monitor_tag mt JOIN tag ON mt.tag_id = tag.id WHERE mt.monitor_id = ? ORDER BY tag.name", [ this.id ]);
+        return await R.getAll("SELECT mt.*, tag.name, tag.color FROM monitor_tag mt JOIN tag ON mt.tag_id = tag.id WHERE mt.monitor_id = ? ORDER BY tag.name", [this.id]);
     }
 
     /**
@@ -358,6 +359,7 @@ class Monitor extends BeanModel {
     async start(io) {
         let previousBeat = null;
         let retries = 0;
+        this.downtimeCount = 0;
 
         try {
             this.prometheus = new Prometheus(this, await this.getTags());
@@ -369,7 +371,7 @@ class Monitor extends BeanModel {
 
             let beatInterval = this.interval;
 
-            if (! beatInterval) {
+            if (!beatInterval) {
                 beatInterval = 1;
             }
 
@@ -911,6 +913,8 @@ class Monitor extends BeanModel {
                 if (Monitor.isImportantForNotification(isFirstBeat, previousBeat?.status, bean.status)) {
                     log.debug("monitor", `[${this.name}] sendNotification`);
                     await Monitor.sendNotification(isFirstBeat, this, bean);
+                    await Monitor.checkAndSendNotificationRules(this, bean, 0, -1);
+                    this.downtimeCount = 0;
                 } else {
                     log.debug("monitor", `[${this.name}] will not sendNotification because it is (or was) under maintenance`);
                 }
@@ -926,6 +930,13 @@ class Monitor extends BeanModel {
 
             } else {
                 bean.important = false;
+
+                if (bean.status === DOWN) {
+                    this.downtimeCount++;
+                    let currentDuration = this.downtimeCount * this.interval;
+                    let previousDuration = (this.downtimeCount - 1) * this.interval;
+                    await Monitor.checkAndSendNotificationRules(this, bean, currentDuration, previousDuration);
+                }
 
                 if (bean.status === DOWN && this.resendInterval > 0) {
                     ++bean.downCount;
@@ -972,7 +983,7 @@ class Monitor extends BeanModel {
 
             previousBeat = bean;
 
-            if (! this.isStop) {
+            if (!this.isStop) {
                 log.debug("monitor", `[${this.name}] SetTimeout for next check.`);
 
                 let intervalRemainingMs = Math.max(
@@ -1001,7 +1012,7 @@ class Monitor extends BeanModel {
                 UptimeKumaServer.errorLog(e, false);
                 log.error("monitor", "Please report to https://github.com/louislam/uptime-kuma/issues");
 
-                if (! this.isStop) {
+                if (!this.isStop) {
                     log.info("monitor", "Try to restart the monitor");
                     this.heartbeatInterval = setTimeout(safeBeat, this.interval * 1000);
                 }
@@ -1053,7 +1064,8 @@ class Monitor extends BeanModel {
                 let oauth2AuthHeader = {
                     "Authorization": this.oauthAccessToken.token_type + " " + this.oauthAccessToken.access_token,
                 };
-                options.headers = { ...(options.headers),
+                options.headers = {
+                    ...(options.headers),
                     ...(oauth2AuthHeader)
                 };
 
@@ -1301,39 +1313,93 @@ class Monitor extends BeanModel {
     static async sendNotification(isFirstBeat, monitor, bean) {
         if (!isFirstBeat || bean.status === DOWN) {
             const notificationList = await Monitor.getNotificationList(monitor);
+            await Monitor.sendNotificationToList(monitor, bean, notificationList);
+        }
+    }
 
-            let text;
-            if (bean.status === UP) {
-                text = "✅ Up";
-            } else {
-                text = "🔴 Down";
-            }
+    /**
+     * Send notification to a specific list of notifications
+     * @param {Monitor} monitor The monitor
+     * @param {Bean} bean Status information
+     * @param {Array} notificationList List of notifications
+     * @returns {Promise<void>}
+     */
+    static async sendNotificationToList(monitor, bean, notificationList) {
+        let text;
+        if (bean.status === UP) {
+            text = "✅ Up";
+        } else {
+            text = "🔴 Down";
+        }
 
-            let msg = `[${monitor.name}] [${text}] ${bean.msg}`;
+        let msg = `[${monitor.name}] [${text}] ${bean.msg}`;
 
-            for (let notification of notificationList) {
-                try {
-                    const heartbeatJSON = bean.toJSON();
-                    const monitorData = [{ id: monitor.id,
-                        active: monitor.active,
-                        name: monitor.name
-                    }];
-                    const preloadData = await Monitor.preparePreloadData(monitorData);
-                    // Prevent if the msg is undefined, notifications such as Discord cannot send out.
-                    if (!heartbeatJSON["msg"]) {
-                        heartbeatJSON["msg"] = "N/A";
-                    }
+        if (monitor.url && monitor.url !== "https://" && monitor.url !== "http://") {
+            msg += `\nURL: ${monitor.url}`;
+        }
 
-                    // Also provide the time in server timezone
-                    heartbeatJSON["timezone"] = await UptimeKumaServer.getInstance().getTimezone();
-                    heartbeatJSON["timezoneOffset"] = UptimeKumaServer.getInstance().getTimezoneOffset();
-                    heartbeatJSON["localDateTime"] = dayjs.utc(heartbeatJSON["time"]).tz(heartbeatJSON["timezone"]).format(SQL_DATETIME_FORMAT);
-
-                    await Notification.send(JSON.parse(notification.config), msg, monitor.toJSON(preloadData, false), heartbeatJSON);
-                } catch (e) {
-                    log.error("monitor", "Cannot send notification to " + notification.name);
-                    log.error("monitor", e);
+        for (let notification of notificationList) {
+            try {
+                const heartbeatJSON = bean.toJSON();
+                const monitorData = [{
+                    id: monitor.id,
+                    active: monitor.active,
+                    name: monitor.name
+                }];
+                const preloadData = await Monitor.preparePreloadData(monitorData);
+                // Prevent if the msg is undefined, notifications such as Discord cannot send out.
+                if (!heartbeatJSON["msg"]) {
+                    heartbeatJSON["msg"] = "N/A";
                 }
+
+                // Also provide the time in server timezone
+                heartbeatJSON["timezone"] = await UptimeKumaServer.getInstance().getTimezone();
+                heartbeatJSON["timezoneOffset"] = UptimeKumaServer.getInstance().getTimezoneOffset();
+                heartbeatJSON["localDateTime"] = dayjs.utc(heartbeatJSON["time"]).tz(heartbeatJSON["timezone"]).format(SQL_DATETIME_FORMAT);
+
+                await Notification.send(JSON.parse(notification.config), msg, monitor.toJSON(preloadData, false), heartbeatJSON);
+            } catch (e) {
+                log.error("monitor", "Cannot send notification to " + notification.name);
+                log.error("monitor", e);
+            }
+        }
+    }
+
+    /**
+     * Get notification rules for a monitor
+     * @param {number} monitorID Monitor ID
+     * @returns {Promise<Array>} List of rules
+     */
+    static async getNotificationRules(monitorID) {
+        return await R.getAll("SELECT * FROM monitor_notification_rule WHERE monitor_id = ? AND active = 1", [monitorID]);
+    }
+
+    /**
+     * Get notifications for a rule
+     * @param {number} ruleID Rule ID
+     * @returns {Promise<Array>} List of notifications
+     */
+    static async getNotificationRuleNotifications(ruleID) {
+        return await R.getAll("SELECT notification.* FROM notification, monitor_notification_rule_notification WHERE monitor_notification_rule_id = ? AND monitor_notification_rule_notification.notification_id = notification.id", [ruleID]);
+    }
+
+    /**
+     * Check and send notification rules
+     * @param {Monitor} monitor Monitor object
+     * @param {Bean} bean Heartbeat bean
+     * @param {number} currentDownTime Current downtime duration in seconds
+     * @param {number} previousDownTime Previous downtime duration in seconds
+     */
+    static async checkAndSendNotificationRules(monitor, bean, currentDownTime, previousDownTime) {
+        const rules = await Monitor.getNotificationRules(monitor.id);
+        for (const rule of rules) {
+            // Check if the rule should be triggered
+            // Trigger if current duration is greater than or equal to delay
+            // AND previous duration was less than delay (to avoid duplicate sending)
+            if (currentDownTime >= rule.delay && previousDownTime < rule.delay) {
+                log.debug("monitor", `[${monitor.name}] Triggering notification rule: Delay ${rule.delay}s`);
+                const notifications = await Monitor.getNotificationRuleNotifications(rule.id);
+                await Monitor.sendNotificationToList(monitor, bean, notifications);
             }
         }
     }
@@ -1359,7 +1425,7 @@ class Monitor extends BeanModel {
         if (tlsInfoObject && tlsInfoObject.certInfo && tlsInfoObject.certInfo.daysRemaining) {
             const notificationList = await Monitor.getNotificationList(this);
 
-            if (! notificationList.length > 0) {
+            if (!notificationList.length > 0) {
                 // fail fast. If no notification is set, all the following checks can be skipped.
                 log.debug("monitor", "No notification, no need to send cert notification");
                 return;
@@ -1368,8 +1434,8 @@ class Monitor extends BeanModel {
             let notifyDays = await setting("tlsExpiryNotifyDays");
             if (notifyDays == null || !Array.isArray(notifyDays)) {
                 // Reset Default
-                await setSetting("tlsExpiryNotifyDays", [ 7, 14, 21 ], "general");
-                notifyDays = [ 7, 14, 21 ];
+                await setSetting("tlsExpiryNotifyDays", [7, 14, 21], "general");
+                notifyDays = [7, 14, 21];
             }
 
             if (Array.isArray(notifyDays)) {
@@ -1460,7 +1526,7 @@ class Monitor extends BeanModel {
         const maintenanceIDList = await R.getCol(`
             SELECT maintenance_id FROM monitor_maintenance
             WHERE monitor_id = ?
-        `, [ monitorID ]);
+        `, [monitorID]);
 
         for (const maintenanceID of maintenanceIDList) {
             const maintenance = await UptimeKumaServer.getInstance().getMaintenance(maintenanceID);
@@ -1557,6 +1623,7 @@ class Monitor extends BeanModel {
         const activeStatusMap = new Map();
         const forceInactiveMap = new Map();
         const pathsMap = new Map();
+        const notificationRulesMap = new Map();
 
         if (monitorData.length > 0) {
             const monitorIDs = monitorData.map(monitor => monitor.id);
@@ -1607,6 +1674,40 @@ class Monitor extends BeanModel {
             monitorData.forEach((monitor, index) => {
                 pathsMap.set(monitor.id, paths[index]);
             });
+
+            const allRules = await R.getAll(`
+                SELECT * FROM monitor_notification_rule
+                WHERE monitor_id IN (${monitorIDs.map(() => "?").join(",")})
+            `, monitorIDs);
+
+            if (allRules.length > 0) {
+                const ruleIDs = allRules.map(r => r.id);
+                const allRuleNotifications = await R.getAll(`
+                    SELECT mnrn.monitor_notification_rule_id, mnrn.notification_id 
+                    FROM monitor_notification_rule_notification mnrn
+                    WHERE mnrn.monitor_notification_rule_id IN (${ruleIDs.map(() => "?").join(",")})
+                `, ruleIDs);
+
+                const ruleNotificationsMap = {};
+                for (const rn of allRuleNotifications) {
+                    if (!ruleNotificationsMap[rn.monitor_notification_rule_id]) {
+                        ruleNotificationsMap[rn.monitor_notification_rule_id] = {};
+                    }
+                    ruleNotificationsMap[rn.monitor_notification_rule_id][rn.notification_id] = true;
+                }
+
+                for (const rule of allRules) {
+                    rule.notificationIDList = ruleNotificationsMap[rule.id] || {};
+                    rule.active = Boolean(rule.active);
+                }
+
+                for (const rule of allRules) {
+                    if (!notificationRulesMap.has(rule.monitor_id)) {
+                        notificationRulesMap.set(rule.monitor_id, []);
+                    }
+                    notificationRulesMap.get(rule.monitor_id).push(rule);
+                }
+            }
         }
 
         return {
@@ -1617,6 +1718,7 @@ class Monitor extends BeanModel {
             activeStatus: activeStatusMap,
             forceInactive: forceInactiveMap,
             paths: pathsMap,
+            notificationRules: notificationRulesMap,
         };
     }
 
@@ -1657,7 +1759,7 @@ class Monitor extends BeanModel {
      * @returns {Promise<string[]>} Full path (includes groups and the name) of the monitor
      */
     static async getAllPath(monitorID, name) {
-        const path = [ name ];
+        const path = [name];
 
         if (this.parent === null) {
             return path;

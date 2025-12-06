@@ -718,6 +718,9 @@ let needSetup = false;
                 let notificationIDList = monitor.notificationIDList;
                 delete monitor.notificationIDList;
 
+                let notificationRules = monitor.notificationRules;
+                delete monitor.notificationRules;
+
                 // Ensure status code ranges are strings
                 if (!monitor.accepted_statuscodes.every((code) => typeof code === "string")) {
                     throw new Error("Accepted status codes are not all strings");
@@ -736,7 +739,7 @@ let needSetup = false;
                  * List of frontend-only properties that should not be saved to the database.
                  * Should clean up before saving to the database.
                  */
-                const frontendOnlyProperties = [ "humanReadableInterval" ];
+                const frontendOnlyProperties = ["humanReadableInterval"];
                 for (const prop of frontendOnlyProperties) {
                     if (prop in monitor) {
                         delete monitor[prop];
@@ -751,6 +754,7 @@ let needSetup = false;
                 await R.store(bean);
 
                 await updateMonitorNotification(bean.id, notificationIDList);
+                await updateMonitorNotificationRules(bean.id, notificationRules);
 
                 await server.sendUpdateMonitorIntoList(socket, bean.id);
 
@@ -784,7 +788,7 @@ let needSetup = false;
                 let removeGroupChildren = false;
                 checkLogin(socket);
 
-                let bean = await R.findOne("monitor", " id = ? ", [ monitor.id ]);
+                let bean = await R.findOne("monitor", " id = ? ", [monitor.id]);
 
                 if (bean.user_id !== socket.userID) {
                     throw new Error("Permission denied.");
@@ -919,6 +923,7 @@ let needSetup = false;
                 }
 
                 await updateMonitorNotification(bean.id, monitor.notificationIDList);
+                await updateMonitorNotificationRules(bean.id, monitor.notificationRules);
 
                 if (await Monitor.isActive(bean.id, bean.active)) {
                     await restartMonitor(socket.userID, bean.id);
@@ -1195,7 +1200,7 @@ let needSetup = false;
             try {
                 checkLogin(socket);
 
-                let bean = await R.findOne("tag", " id = ? ", [ tag.id ]);
+                let bean = await R.findOne("tag", " id = ? ", [tag.id]);
                 if (bean == null) {
                     callback({
                         ok: false,
@@ -1227,7 +1232,7 @@ let needSetup = false;
             try {
                 checkLogin(socket);
 
-                await R.exec("DELETE FROM tag WHERE id = ? ", [ tagID ]);
+                await R.exec("DELETE FROM tag WHERE id = ? ", [tagID]);
 
                 callback({
                     ok: true,
@@ -1819,6 +1824,46 @@ async function afterLogin(socket, user) {
  * started in test mode?
  * @returns {Promise<void>}
  */
+/**
+ * Update notification rules for a given monitor
+ * @param {number} monitorID ID of monitor to update
+ * @param {Array} rules List of rules
+ * @returns {Promise<void>}
+ */
+async function updateMonitorNotificationRules(monitorID, rules) {
+    log.debug("monitor", `Updating notification rules for monitor ${monitorID}`);
+    await R.exec("DELETE FROM monitor_notification_rule WHERE monitor_id = ? ", [
+        monitorID,
+    ]);
+
+    if (!rules) {
+        log.debug("monitor", "No rules to update");
+        return;
+    }
+
+    log.debug("monitor", `Saving ${rules.length} rules`);
+
+    for (let rule of rules) {
+        let bean = R.dispense("monitor_notification_rule");
+        bean.monitor_id = monitorID;
+        bean.delay = rule.delay;
+        bean.active = rule.active !== false;
+        await R.store(bean);
+
+        if (rule.notificationIDList) {
+            log.debug("monitor", `Saving notifications for rule ${bean.id}: ${JSON.stringify(rule.notificationIDList)}`);
+            for (let notificationID in rule.notificationIDList) {
+                if (rule.notificationIDList[notificationID]) {
+                    let relation = R.dispense("monitor_notification_rule_notification");
+                    relation.monitor_notification_rule_id = bean.id;
+                    relation.notification_id = notificationID;
+                    await R.store(relation);
+                }
+            }
+        }
+    }
+}
+
 async function initDatabase(testMode = false) {
     log.debug("server", "Connecting to the database");
     await Database.connect(testMode);
