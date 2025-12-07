@@ -1132,5 +1132,10 @@
     "Clear Form": "清除表單",
     "pause": "暫停",
     "Staged Tags for Batch Add": "暫存標籤以批次新增",
-    "Add Another Tag": "新增標籤"
+    "Add Another Tag": "新增標籤",
+    "Notification Rules": "通知規則",
+    "Reports": "報告",
+    "Add Rule": "新增規則",
+    "Delay (seconds)": "延遲（秒）",
+    "Select Notifications": "選擇通知"
 }

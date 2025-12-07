@@ -129,7 +129,6 @@ class Monitor extends BeanModel {
             docker_host: this.docker_host,
             proxyId: this.proxy_id,
             notificationIDList: preloadData.notifications.get(this.id) || {},
-            notificationRules: preloadData.notificationRules?.get(this.id) || [],
             tags: preloadData.tags.get(this.id) || [],
             maintenance: preloadData.maintenanceStatus.get(this.id),
             mqttTopic: this.mqttTopic,
@@ -164,11 +163,16 @@ class Monitor extends BeanModel {
             rabbitmqNodes: JSON.parse(this.rabbitmqNodes),
             conditions: JSON.parse(this.conditions),
             ipFamily: this.ipFamily,
+            notification_rules: this.notification_rules,
+            notificationRules: (preloadData.notificationRules && preloadData.notificationRules.get(this.id)) || [],
 
             // ping advanced options
             ping_numeric: this.isPingNumeric(),
             ping_count: this.ping_count,
             ping_per_request_timeout: this.ping_per_request_timeout,
+
+            // dependencies
+            dependencies: (preloadData.dependencies && preloadData.dependencies.get(this.id)) || [],
         };
 
         if (includeSensitiveData) {
@@ -215,7 +219,7 @@ class Monitor extends BeanModel {
      * monitor
      */
     async getTags() {
-        return await R.getAll("SELECT mt.*, tag.name, tag.color FROM monitor_tag mt JOIN tag ON mt.tag_id = tag.id WHERE mt.monitor_id = ? ORDER BY tag.name", [this.id]);
+        return await R.getAll("SELECT mt.*, tag.name, tag.color FROM monitor_tag mt JOIN tag ON mt.tag_id = tag.id WHERE mt.monitor_id = ? ORDER BY tag.name", [ this.id ]);
     }
 
     /**
@@ -359,7 +363,6 @@ class Monitor extends BeanModel {
     async start(io) {
         let previousBeat = null;
         let retries = 0;
-        this.downtimeCount = 0;
 
         try {
             this.prometheus = new Prometheus(this, await this.getTags());
@@ -371,7 +374,7 @@ class Monitor extends BeanModel {
 
             let beatInterval = this.interval;
 
-            if (!beatInterval) {
+            if (! beatInterval) {
                 beatInterval = 1;
             }
 
@@ -410,7 +413,7 @@ class Monitor extends BeanModel {
             // Runtime patch timeout if it is 0
             // See https://github.com/louislam/uptime-kuma/pull/3961#issuecomment-1804149144
             if (!this.timeout || this.timeout <= 0) {
-                this.timeout = this.interval * 1000 * 0.8;
+                this.timeout = this.interval * 1000 * 0.8; // 0.8 is the default timeout percentage
             }
 
             try {
@@ -886,9 +889,15 @@ class Monitor extends BeanModel {
                     bean.msg = error.message;
                 }
 
-                // If UP come in here, it must be upside down mode
-                // Just reset the retries
-                if (this.isUpsideDown() && bean.status === UP) {
+                // Handle upside down mode: when service is actually UP, it's flipped to DOWN
+                // and an error "Flip UP to DOWN" is thrown. We need to handle this case.
+                if (this.isUpsideDown() && error.message === "Flip UP to DOWN") {
+                    // Service is actually UP, but we want to show it as DOWN in upside down mode
+                    bean.status = DOWN;
+                    retries = 0;
+                } else if (this.isUpsideDown() && bean.status === UP) {
+                    // If UP come in here, it must be upside down mode
+                    // Just reset the retries
                     retries = 0;
 
                 } else if ((this.maxretries > 0) && (retries < this.maxretries)) {
@@ -897,6 +906,10 @@ class Monitor extends BeanModel {
                 } else {
                     // Continue counting retries during DOWN
                     retries++;
+                    // Ensure status is set to DOWN if not already set
+                    if (bean.status !== PENDING && bean.status !== MAINTENANCE) {
+                        bean.status = DOWN;
+                    }
                 }
             }
 
@@ -912,9 +925,14 @@ class Monitor extends BeanModel {
 
                 if (Monitor.isImportantForNotification(isFirstBeat, previousBeat?.status, bean.status)) {
                     log.debug("monitor", `[${this.name}] sendNotification`);
-                    await Monitor.sendNotification(isFirstBeat, this, bean);
-                    await Monitor.checkAndSendNotificationRules(this, bean, 0, -1);
-                    this.downtimeCount = 0;
+                    try {
+                        await Monitor.sendNotification(isFirstBeat, this, bean);
+                    } catch (e) {
+                        // Don't let notification errors prevent heartbeat from being sent
+                        log.error("monitor", `[${this.name}] Failed to send notification: ${e.message}`);
+                        log.error("monitor", e);
+                    }
+                    // log.debug("monitor", `[${this.name}] sendNotification (skipped in dev)`);
                 } else {
                     log.debug("monitor", `[${this.name}] will not sendNotification because it is (or was) under maintenance`);
                 }
@@ -932,21 +950,134 @@ class Monitor extends BeanModel {
                 bean.important = false;
 
                 if (bean.status === DOWN) {
-                    this.downtimeCount++;
-                    let currentDuration = this.downtimeCount * this.interval;
-                    let previousDuration = (this.downtimeCount - 1) * this.interval;
-                    await Monitor.checkAndSendNotificationRules(this, bean, currentDuration, previousDuration);
-                }
+                    // Check if we should send notification based on resendInterval
+                    if (this.resendInterval > 0) {
+                        // IMPORTANT: When resendInterval > 0, notification rules are NOT used!
+                        // Only the old resendInterval mechanism (send notification every N heartbeats) is used.
+                        // If you want to use notification rules (e.g., 60s/120s thresholds), set resendInterval = 0
+                        if (this.notification_rules) {
+                            log.debug("monitor", `[${this.name}] resendInterval=${this.resendInterval} > 0, notification rules will NOT be used. Set resendInterval=0 to enable time-based notification rules.`);
+                        }
+                        ++bean.downCount;
+                        if (bean.downCount >= this.resendInterval) {
+                            // Send notification again, because we are still DOWN
+                            log.debug("monitor", `[${this.name}] sendNotification again: Down Count: ${bean.downCount} | Resend Interval: ${this.resendInterval}`);
+                            try {
+                                await Monitor.sendNotification(isFirstBeat, this, bean);
+                            } catch (e) {
+                                // Don't let notification errors prevent heartbeat from being sent
+                                log.error("monitor", `[${this.name}] Failed to send notification: ${e.message}`);
+                                log.error("monitor", e);
+                            }
 
-                if (bean.status === DOWN && this.resendInterval > 0) {
-                    ++bean.downCount;
-                    if (bean.downCount >= this.resendInterval) {
-                        // Send notification again, because we are still DOWN
-                        log.debug("monitor", `[${this.name}] sendNotification again: Down Count: ${bean.downCount} | Resend Interval: ${this.resendInterval}`);
-                        await Monitor.sendNotification(isFirstBeat, this, bean);
+                            // Reset down count
+                            bean.downCount = 0;
+                        }
+                    } else {
+                        // If resendInterval is 0, check notification rules to see if we should send notification
+                        // based on down duration thresholds
+                        // IMPORTANT: Notification rules only work when resendInterval = 0
+                        // If resendInterval > 0, the old resendInterval mechanism is used instead
+                        let notificationRules = null;
+                        
+                        // Try to load notification rules from database if not already loaded
+                        if (!this.notification_rules) {
+                            const rules = await Monitor.getMonitorNotificationRules([this.id]);
+                            if (rules && rules.length > 0) {
+                                notificationRules = rules;
+                            }
+                        } else {
+                            try {
+                                notificationRules = JSON.parse(this.notification_rules);
+                            } catch (e) {
+                                log.error("monitor", `Failed to parse notification_rules for monitor ${this.id}: ${e.message}`);
+                                // Fallback: try loading from database
+                                const rules = await Monitor.getMonitorNotificationRules([this.id]);
+                                if (rules && rules.length > 0) {
+                                    notificationRules = rules;
+                                }
+                            }
+                        }
 
-                        // Reset down count
-                        bean.downCount = 0;
+                        if (notificationRules && Array.isArray(notificationRules) && notificationRules.length > 0) {
+                            // Filter out inactive rules
+                            const activeRules = notificationRules.filter(rule => rule.active !== false);
+                            if (activeRules.length === 0) {
+                                log.debug("monitor", `[${this.name}] All notification rules are inactive, skipping rule-based notifications`);
+                            } else {
+                                const downDuration = await Monitor.getDownDuration(this.id, bean);
+                                if (downDuration !== null) {
+                                    // Sort rules by duration (ascending) - shortest duration first
+                                    const sortedRules = [...activeRules].sort((a, b) => (a.duration || a.delay || 0) - (b.duration || b.delay || 0));
+                                    
+                                    const previousDownDuration = previousBeat ? await Monitor.getDownDuration(this.id, previousBeat) : null;
+                                    
+                                    log.debug("monitor", `[${this.name}] Checking notification rules: downDuration=${downDuration}s, previousDownDuration=${previousDownDuration}s, rules=${sortedRules.map(r => r.duration || r.delay || 0).join(',')}s`);
+                                    
+                                    // Check ALL rules that should be triggered (not just the highest one)
+                                    // This ensures that:
+                                    // 1. Rule with 30s duration triggers at 30s
+                                    // 2. Rule with 60s duration triggers at 60s
+                                    // 3. Rule with 90s duration triggers at 90s
+                                    // Each rule triggers when its threshold is reached
+                                    for (const rule of sortedRules) {
+                                        const ruleDuration = rule.duration || rule.delay || 0;
+                                        
+                                        // Skip if this rule's duration hasn't been reached yet
+                                        if (downDuration < ruleDuration) {
+                                            log.debug("monitor", `[${this.name}] Rule duration=${ruleDuration}s not reached yet (downDuration=${downDuration}s)`);
+                                            continue;
+                                        }
+                                        
+                                        // Check if we've just reached or crossed this rule's threshold
+                                        // This means: current downDuration >= rule.duration, but previous was < rule.duration
+                                        const justReachedThreshold = (previousDownDuration === null || previousDownDuration < ruleDuration) &&
+                                            downDuration >= ruleDuration;
+                                        
+                                        log.debug("monitor", `[${this.name}] Rule duration=${ruleDuration}s: downDuration=${downDuration}s, previousDownDuration=${previousDownDuration}s, justReachedThreshold=${justReachedThreshold}`);
+                                        
+                                        if (justReachedThreshold) {
+                                            // Get the notification list for this specific rule
+                                            let ruleNotificationList = [];
+                                            
+                                            // Support multiple formats for notification IDs
+                                            let notificationIdsToUse = [];
+                                            if (rule.notificationIDList && typeof rule.notificationIDList === 'object') {
+                                                notificationIdsToUse = Object.keys(rule.notificationIDList).filter(id => rule.notificationIDList[id]);
+                                            } else if (rule.notificationIds && Array.isArray(rule.notificationIds)) {
+                                                notificationIdsToUse = rule.notificationIds;
+                                            } else if (rule.notificationId !== null && rule.notificationId !== undefined) {
+                                                notificationIdsToUse = [rule.notificationId];
+                                            }
+
+                                            if (notificationIdsToUse.length > 0) {
+                                                const placeholders = notificationIdsToUse.map(() => '?').join(',');
+                                                ruleNotificationList = await R.getAll(
+                                                    `SELECT notification.* FROM notification, monitor_notification 
+                                                    WHERE monitor_id = ? 
+                                                    AND monitor_notification.notification_id = notification.id 
+                                                    AND notification.id IN (${placeholders})`,
+                                                    [this.id, ...notificationIdsToUse]
+                                                );
+                                                log.debug("monitor", `[${this.name}] Rule notification list: ${ruleNotificationList.length} notification(s) for rule duration=${ruleDuration}s`);
+                                            }
+
+                                            if (ruleNotificationList.length > 0) {
+                                                log.debug("monitor", `[${this.name}] sendNotification based on rule threshold: duration=${ruleDuration}s, downDuration=${downDuration}s, notifications=${notificationIdsToUse.join(',')}`);
+                                                try {
+                                                    await Monitor.sendNotification(isFirstBeat, this, bean, ruleNotificationList);
+                                                } catch (e) {
+                                                    log.error("monitor", `[${this.name}] Failed to send notification: ${e.message}`);
+                                                    log.error("monitor", e);
+                                                }
+                                            } else {
+                                                log.warn("monitor", `[${this.name}] Rule matched but no valid notifications found for rule duration=${ruleDuration}s`);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -983,7 +1114,7 @@ class Monitor extends BeanModel {
 
             previousBeat = bean;
 
-            if (!this.isStop) {
+            if (! this.isStop) {
                 log.debug("monitor", `[${this.name}] SetTimeout for next check.`);
 
                 let intervalRemainingMs = Math.max(
@@ -1012,7 +1143,7 @@ class Monitor extends BeanModel {
                 UptimeKumaServer.errorLog(e, false);
                 log.error("monitor", "Please report to https://github.com/louislam/uptime-kuma/issues");
 
-                if (!this.isStop) {
+                if (! this.isStop) {
                     log.info("monitor", "Try to restart the monitor");
                     this.heartbeatInterval = setTimeout(safeBeat, this.interval * 1000);
                 }
@@ -1064,8 +1195,7 @@ class Monitor extends BeanModel {
                 let oauth2AuthHeader = {
                     "Authorization": this.oauthAccessToken.token_type + " " + this.oauthAccessToken.access_token,
                 };
-                options.headers = {
-                    ...(options.headers),
+                options.headers = { ...(options.headers),
                     ...(oauth2AuthHeader)
                 };
 
@@ -1082,6 +1212,17 @@ class Monitor extends BeanModel {
                 if (typeof error.message === "string" && error.message.includes("maxContentLength size of -1 exceeded")) {
                     error.message = "response timeout: incomplete response within a interval";
                 }
+                
+                // Improve error message for SSL/TLS protocol errors
+                if (error.code === "EPROTO" || (typeof error.message === "string" && error.message.includes("wrong version number"))) {
+                    const url = new URL(options.url);
+                    if (url.protocol === "https:") {
+                        error.message = `SSL/TLS error: The server at ${url.hostname}${url.port ? ":" + url.port : ""} may not support HTTPS. Try using http:// instead of https://`;
+                    } else {
+                        error.message = `SSL/TLS error: ${error.message}`;
+                    }
+                }
+                
                 throw error;
             }
         }
@@ -1308,111 +1449,264 @@ class Monitor extends BeanModel {
      * @param {boolean} isFirstBeat Is this beat the first of this monitor?
      * @param {Monitor} monitor The monitor to send a notification about
      * @param {Bean} bean Status information about monitor
+     * @param {Array|null} overrideNotificationList Optional: override notification list (e.g., from notification rules)
      * @returns {void}
      */
-    static async sendNotification(isFirstBeat, monitor, bean) {
+    static async sendNotification(isFirstBeat, monitor, bean, overrideNotificationList = null) {
         if (!isFirstBeat || bean.status === DOWN) {
-            const notificationList = await Monitor.getNotificationList(monitor);
-            await Monitor.sendNotificationToList(monitor, bean, notificationList);
-        }
-    }
+            const notificationList = overrideNotificationList || await Monitor.getNotificationList(monitor, bean);
+            
+            log.debug("monitor", `[${monitor.name}] sendNotification: isFirstBeat=${isFirstBeat}, status=${bean.status}, notificationCount=${notificationList.length}, override=${overrideNotificationList !== null}`);
 
-    /**
-     * Send notification to a specific list of notifications
-     * @param {Monitor} monitor The monitor
-     * @param {Bean} bean Status information
-     * @param {Array} notificationList List of notifications
-     * @returns {Promise<void>}
-     */
-    static async sendNotificationToList(monitor, bean, notificationList) {
-        let text;
-        if (bean.status === UP) {
-            text = "✅ Up";
-        } else {
-            text = "🔴 Down";
-        }
+            if (notificationList.length === 0) {
+                log.warn("monitor", `[${monitor.name}] No notifications configured for this monitor`);
+                return;
+            }
 
-        let msg = `[${monitor.name}] [${text}] ${bean.msg}`;
+            let text;
+            if (bean.status === UP) {
+                text = "✅ Up";
+            } else {
+                text = "🔴 Down";
+            }
 
-        if (monitor.url && monitor.url !== "https://" && monitor.url !== "http://") {
-            msg += `\nURL: ${monitor.url}`;
-        }
+            let msg = `[${monitor.name}] [${text}] ${bean.msg}`;
 
-        for (let notification of notificationList) {
-            try {
-                const heartbeatJSON = bean.toJSON();
-                const monitorData = [{
-                    id: monitor.id,
-                    active: monitor.active,
-                    name: monitor.name
-                }];
-                const preloadData = await Monitor.preparePreloadData(monitorData);
-                // Prevent if the msg is undefined, notifications such as Discord cannot send out.
-                if (!heartbeatJSON["msg"]) {
-                    heartbeatJSON["msg"] = "N/A";
+            for (let notification of notificationList) {
+                try {
+                    const heartbeatJSON = bean.toJSON();
+                    const monitorData = [{ id: monitor.id,
+                        active: monitor.active,
+                        name: monitor.name
+                    }];
+                    const preloadData = await Monitor.preparePreloadData(monitorData);
+                    // Prevent if the msg is undefined, notifications such as Discord cannot send out.
+                    if (!heartbeatJSON["msg"]) {
+                        heartbeatJSON["msg"] = "N/A";
+                    }
+
+                    // Also provide the time in server timezone
+                    heartbeatJSON["timezone"] = await UptimeKumaServer.getInstance().getTimezone();
+                    heartbeatJSON["timezoneOffset"] = UptimeKumaServer.getInstance().getTimezoneOffset();
+                    heartbeatJSON["localDateTime"] = dayjs.utc(heartbeatJSON["time"]).tz(heartbeatJSON["timezone"]).format(SQL_DATETIME_FORMAT);
+
+                    await Notification.send(JSON.parse(notification.config), msg, monitor.toJSON(preloadData, false), heartbeatJSON);
+                } catch (e) {
+                    log.error("monitor", "Cannot send notification to " + notification.name);
+                    log.error("monitor", e);
                 }
-
-                // Also provide the time in server timezone
-                heartbeatJSON["timezone"] = await UptimeKumaServer.getInstance().getTimezone();
-                heartbeatJSON["timezoneOffset"] = UptimeKumaServer.getInstance().getTimezoneOffset();
-                heartbeatJSON["localDateTime"] = dayjs.utc(heartbeatJSON["time"]).tz(heartbeatJSON["timezone"]).format(SQL_DATETIME_FORMAT);
-
-                await Notification.send(JSON.parse(notification.config), msg, monitor.toJSON(preloadData, false), heartbeatJSON);
-            } catch (e) {
-                log.error("monitor", "Cannot send notification to " + notification.name);
-                log.error("monitor", e);
             }
         }
     }
 
     /**
-     * Get notification rules for a monitor
-     * @param {number} monitorID Monitor ID
-     * @returns {Promise<Array>} List of rules
+     * Get the first down heartbeat time for a monitor to calculate down duration
+     * @param {number} monitorID ID of monitor
+     * @param {Bean} currentBean Current heartbeat bean
+     * @returns {Promise<number|null>} Duration in seconds since first down, or null if not down
      */
-    static async getNotificationRules(monitorID) {
-        return await R.getAll("SELECT * FROM monitor_notification_rule WHERE monitor_id = ? AND active = 1", [monitorID]);
-    }
+    static async getDownDuration(monitorID, currentBean) {
+        if (currentBean.status !== DOWN) {
+            return null;
+        }
 
-    /**
-     * Get notifications for a rule
-     * @param {number} ruleID Rule ID
-     * @returns {Promise<Array>} List of notifications
-     */
-    static async getNotificationRuleNotifications(ruleID) {
-        return await R.getAll("SELECT notification.* FROM notification, monitor_notification_rule_notification WHERE monitor_notification_rule_id = ? AND monitor_notification_rule_notification.notification_id = notification.id", [ruleID]);
-    }
+        // Ensure time is in string format for SQL query
+        const timeStr = typeof currentBean.time === 'string' ? currentBean.time : String(currentBean.time);
 
-    /**
-     * Check and send notification rules
-     * @param {Monitor} monitor Monitor object
-     * @param {Bean} bean Heartbeat bean
-     * @param {number} currentDownTime Current downtime duration in seconds
-     * @param {number} previousDownTime Previous downtime duration in seconds
-     */
-    static async checkAndSendNotificationRules(monitor, bean, currentDownTime, previousDownTime) {
-        const rules = await Monitor.getNotificationRules(monitor.id);
-        for (const rule of rules) {
-            // Check if the rule should be triggered
-            // Trigger if current duration is greater than or equal to delay
-            // AND previous duration was less than delay (to avoid duplicate sending)
-            if (currentDownTime >= rule.delay && previousDownTime < rule.delay) {
-                log.debug("monitor", `[${monitor.name}] Triggering notification rule: Delay ${rule.delay}s`);
-                const notifications = await Monitor.getNotificationRuleNotifications(rule.id);
-                await Monitor.sendNotificationToList(monitor, bean, notifications);
+        // Find the first down heartbeat in the current down sequence
+        // We need to find the heartbeat where status changed from UP/PENDING to DOWN
+        const firstDownHeartbeat = await R.findOne("heartbeat", 
+            " monitor_id = ? AND time <= ? AND status = ? ORDER BY time ASC", 
+            [monitorID, timeStr, DOWN]
+        );
+
+        if (!firstDownHeartbeat) {
+            return null;
+        }
+
+        // Check if there's an UP heartbeat after this down heartbeat
+        // If yes, this is not the start of current down sequence
+        const firstDownTimeStr = typeof firstDownHeartbeat.time === 'string' ? firstDownHeartbeat.time : String(firstDownHeartbeat.time);
+        const upAfterDown = await R.findOne("heartbeat",
+            " monitor_id = ? AND time > ? AND time <= ? AND status = ? ORDER BY time ASC",
+            [monitorID, firstDownTimeStr, timeStr, UP]
+        );
+
+        if (upAfterDown) {
+            // There was an UP between firstDownHeartbeat and current, so current down started after upAfterDown
+            // Find the first down after the last UP
+            const upAfterDownTimeStr = typeof upAfterDown.time === 'string' ? upAfterDown.time : String(upAfterDown.time);
+            const firstDownAfterUp = await R.findOne("heartbeat",
+                " monitor_id = ? AND time > ? AND time <= ? AND status = ? ORDER BY time ASC",
+                [monitorID, upAfterDownTimeStr, timeStr, DOWN]
+            );
+
+            if (firstDownAfterUp) {
+                return dayjs(currentBean.time).diff(dayjs(firstDownAfterUp.time), "second");
             }
         }
+
+        return dayjs(currentBean.time).diff(dayjs(firstDownHeartbeat.time), "second");
     }
 
     /**
      * Get list of notification providers for a given monitor
      * @param {Monitor} monitor Monitor to get notification providers for
+     * @param {Bean|null} bean Current heartbeat bean (optional, for time-based notification rules)
      * @returns {Promise<LooseObject<any>[]>} List of notifications
      */
-    static async getNotificationList(monitor) {
+    static async getNotificationList(monitor, bean = null) {
+        // Check if notification rules are configured
+        let notificationRules = null;
+        
+        // Try to load notification rules from database if not already loaded
+        if (!monitor.notification_rules) {
+            const rules = await Monitor.getMonitorNotificationRules([monitor.id]);
+            if (rules && rules.length > 0) {
+                notificationRules = rules;
+            }
+        } else {
+            try {
+                notificationRules = JSON.parse(monitor.notification_rules);
+            } catch (e) {
+                log.error("monitor", `Failed to parse notification_rules for monitor ${monitor.id}: ${e.message}`);
+                // Fallback: try loading from database
+                const rules = await Monitor.getMonitorNotificationRules([monitor.id]);
+                if (rules && rules.length > 0) {
+                    notificationRules = rules;
+                }
+            }
+        }
+
+        // If notification rules are configured and we have a bean with DOWN status, use time-based routing
+        if (notificationRules && Array.isArray(notificationRules) && notificationRules.length > 0 && bean && bean.status === DOWN) {
+            // Filter out inactive rules
+            const activeRules = notificationRules.filter(rule => rule.active !== false);
+            if (activeRules.length === 0) {
+                log.debug("monitor", `[${monitor.name}] All notification rules are inactive, using default notifications`);
+            } else {
+                const downDuration = await Monitor.getDownDuration(monitor.id, bean);
+                
+                log.debug("monitor", `[${monitor.name}] Notification rules check: downDuration=${downDuration}s, rules=${JSON.stringify(activeRules)}`);
+                
+                // Sort rules by duration (ascending) - shortest duration first
+                const sortedRules = [...activeRules].sort((a, b) => (a.duration || a.delay || 0) - (b.duration || b.delay || 0));
+                
+                // When downDuration is null or 0 (first time becoming DOWN), use the rule with minimum duration
+                // This ensures that when UP -> DOWN, we notify the notification channel with the smallest duration threshold
+                if (downDuration === null || downDuration === 0) {
+                    if (sortedRules.length > 0) {
+                        const minDurationRule = sortedRules[0];
+                        const minDuration = minDurationRule.duration || minDurationRule.delay || 0;
+                        log.debug("monitor", `[${monitor.name}] downDuration is ${downDuration} (first time DOWN), using minimum duration rule: ${minDuration}s`);
+                        
+                        // Get notification list for the minimum duration rule
+                        let notificationIdsToUse = [];
+                        if (minDurationRule.notificationIDList && typeof minDurationRule.notificationIDList === 'object') {
+                            notificationIdsToUse = Object.keys(minDurationRule.notificationIDList).filter(id => minDurationRule.notificationIDList[id]);
+                        } else if (minDurationRule.notificationIds && Array.isArray(minDurationRule.notificationIds)) {
+                            notificationIdsToUse = minDurationRule.notificationIds;
+                        } else if (minDurationRule.notificationId !== null && minDurationRule.notificationId !== undefined) {
+                            notificationIdsToUse = [minDurationRule.notificationId];
+                        }
+                        
+                        if (notificationIdsToUse.length > 0) {
+                            const placeholders = notificationIdsToUse.map(() => '?').join(',');
+                            let notificationList = await R.getAll(
+                                `SELECT notification.* FROM notification, monitor_notification 
+                                WHERE monitor_id = ? 
+                                AND monitor_notification.notification_id = notification.id 
+                                AND notification.id IN (${placeholders})`,
+                                [monitor.id, ...notificationIdsToUse]
+                            );
+                            log.debug("monitor", `[${monitor.name}] Returning ${notificationList.length} notification(s) from minimum duration rule (duration=${minDuration}s, notificationIds=${notificationIdsToUse.join(',')})`);
+                            if (notificationList.length > 0) {
+                                return notificationList;
+                            }
+                        }
+                        log.debug("monitor", `[${monitor.name}] Minimum duration rule has no valid notifications, falling back to default`);
+                    } else {
+                        log.debug("monitor", `[${monitor.name}] downDuration is ${downDuration} (first time DOWN), but no active rules found, using default notifications`);
+                    }
+                } else if (downDuration > 0) {
+                    // Only apply notification rules if downDuration > 0 (monitor has been DOWN for some time)
+                    // Sort rules by duration (ascending) to find the matching rule
+                    const sortedRules = [...activeRules].sort((a, b) => (a.duration || 0) - (b.duration || 0));
+                    
+                    // Find the rule that matches the current down duration
+                    // Use the rule with the highest duration that is <= current down duration
+                    let matchingRule = null;
+                    for (const rule of sortedRules) {
+                        if (downDuration >= (rule.duration || 0)) {
+                            matchingRule = rule;
+                        } else {
+                            break;
+                        }
+                    }
+
+                    if (matchingRule) {
+                        log.debug("monitor", `[${monitor.name}] Matched notification rule: duration=${matchingRule.duration}s, downDuration=${downDuration}s`);
+                        
+                        // Support multiple formats:
+                        // 1. notificationIDList (object with notification IDs as keys) - from database
+                        // 2. notificationIds (array) - old format
+                        // 3. notificationId (single value) - new format
+                        let notificationIdsToUse = [];
+                        
+                        if (matchingRule.notificationIDList && typeof matchingRule.notificationIDList === 'object') {
+                            // Format from database: { "1": true, "2": true }
+                            notificationIdsToUse = Object.keys(matchingRule.notificationIDList).filter(id => matchingRule.notificationIDList[id]);
+                        } else if (matchingRule.notificationIds && Array.isArray(matchingRule.notificationIds)) {
+                            // Old format: array
+                            notificationIdsToUse = matchingRule.notificationIds;
+                        } else if (matchingRule.notificationId !== null && matchingRule.notificationId !== undefined) {
+                            // New format: single notificationId
+                            notificationIdsToUse = [matchingRule.notificationId];
+                        }
+
+                        if (notificationIdsToUse.length > 0) {
+                            // Return only the notifications specified in the matching rule
+                            // IMPORTANT: The notifications must also be bound to this monitor in monitor_notification table
+                            const placeholders = notificationIdsToUse.map(() => '?').join(',');
+                            let notificationList = await R.getAll(
+                                `SELECT notification.* FROM notification, monitor_notification 
+                                WHERE monitor_id = ? 
+                                AND monitor_notification.notification_id = notification.id 
+                                AND notification.id IN (${placeholders})`,
+                                [monitor.id, ...notificationIdsToUse]
+                            );
+                            log.debug("monitor", `[${monitor.name}] Returning ${notificationList.length} notification(s) from rule (notificationIds=${notificationIdsToUse.join(',')})`);
+                            if (notificationList.length === 0) {
+                                log.warn("monitor", `[${monitor.name}] Rule matched but none of the notifications [${notificationIdsToUse.join(',')}] are bound to this monitor! Falling back to default notifications.`);
+                            } else {
+                                return notificationList;
+                            }
+                        } else {
+                            log.debug("monitor", `[${monitor.name}] Matched rule but no notification IDs found, falling back to default behavior`);
+                        }
+                    } else {
+                        // No matching rule found (e.g., downDuration = 5 but all rules require duration >= 60)
+                        // Fall back to default notifications
+                        log.debug("monitor", `[${monitor.name}] No matching rule found for downDuration=${downDuration}s (all rules require longer duration), falling back to default behavior`);
+                    }
+                }
+                // If downDuration === 0, also fall through to default behavior
+            }
+        }
+
+        // Default behavior: return all notifications bound to this monitor
+        // This is used when:
+        // 1. No notification rules are configured
+        // 2. Status is UP (rules only apply to DOWN status)
+        // 3. Status is DOWN but downDuration is null (first time DOWN)
+        // 4. Status is DOWN but no rule matches the current downDuration
         let notificationList = await R.getAll("SELECT notification.* FROM notification, monitor_notification WHERE monitor_id = ? AND monitor_notification.notification_id = notification.id ", [
             monitor.id,
         ]);
+        log.debug("monitor", `[${monitor.name}] Returning ${notificationList.length} default notification(s) for monitor`);
+        if (notificationList.length === 0 && bean && bean.status === DOWN) {
+            log.warn("monitor", `[${monitor.name}] WARNING: No notifications are bound to this monitor! Please add notifications in Monitor → Notifications tab.`);
+        }
         return notificationList;
     }
 
@@ -1425,7 +1719,7 @@ class Monitor extends BeanModel {
         if (tlsInfoObject && tlsInfoObject.certInfo && tlsInfoObject.certInfo.daysRemaining) {
             const notificationList = await Monitor.getNotificationList(this);
 
-            if (!notificationList.length > 0) {
+            if (! notificationList.length > 0) {
                 // fail fast. If no notification is set, all the following checks can be skipped.
                 log.debug("monitor", "No notification, no need to send cert notification");
                 return;
@@ -1434,8 +1728,8 @@ class Monitor extends BeanModel {
             let notifyDays = await setting("tlsExpiryNotifyDays");
             if (notifyDays == null || !Array.isArray(notifyDays)) {
                 // Reset Default
-                await setSetting("tlsExpiryNotifyDays", [7, 14, 21], "general");
-                notifyDays = [7, 14, 21];
+                await setSetting("tlsExpiryNotifyDays", [ 7, 14, 21 ], "general");
+                notifyDays = [ 7, 14, 21 ];
             }
 
             if (Array.isArray(notifyDays)) {
@@ -1526,7 +1820,7 @@ class Monitor extends BeanModel {
         const maintenanceIDList = await R.getCol(`
             SELECT maintenance_id FROM monitor_maintenance
             WHERE monitor_id = ?
-        `, [monitorID]);
+        `, [ monitorID ]);
 
         for (const maintenanceID of maintenanceIDList) {
             const maintenance = await UptimeKumaServer.getInstance().getMaintenance(maintenanceID);
@@ -1610,6 +1904,62 @@ class Monitor extends BeanModel {
     }
 
     /**
+     * Gets monitor notification rules of multiple monitors
+     * @param {Array} monitorIDs IDs of monitor to get
+     * @returns {Promise<LooseObject<any>[]>} List of monitor notification rules
+     */
+    static async getMonitorNotificationRules(monitorIDs) {
+        if (!monitorIDs || monitorIDs.length === 0) {
+            return [];
+        }
+        
+        // Get all rules for these monitors
+        const rules = await R.getAll(`
+            SELECT monitor_notification_rule.id, monitor_notification_rule.monitor_id, 
+                   monitor_notification_rule.delay, monitor_notification_rule.active
+            FROM monitor_notification_rule
+            WHERE monitor_notification_rule.monitor_id IN (${monitorIDs.map((_) => "?").join(",")})
+            ORDER BY monitor_notification_rule.monitor_id, monitor_notification_rule.delay
+        `, monitorIDs);
+
+        // Get all notification IDs for these rules
+        const ruleIDs = rules.map(r => r.id);
+        if (ruleIDs.length === 0) {
+            return [];
+        }
+
+        const ruleNotifications = await R.getAll(`
+            SELECT monitor_notification_rule_notification.monitor_notification_rule_id,
+                   monitor_notification_rule_notification.notification_id
+            FROM monitor_notification_rule_notification
+            WHERE monitor_notification_rule_notification.monitor_notification_rule_id IN (${ruleIDs.map((_) => "?").join(",")})
+        `, ruleIDs);
+
+        // Build a map of rule_id -> notification_ids
+        const ruleNotificationMap = new Map();
+        ruleNotifications.forEach(rn => {
+            if (!ruleNotificationMap.has(rn.monitor_notification_rule_id)) {
+                ruleNotificationMap.set(rn.monitor_notification_rule_id, []);
+            }
+            ruleNotificationMap.get(rn.monitor_notification_rule_id).push(rn.notification_id);
+        });
+
+        // Combine rules with their notifications
+        return rules.map(rule => ({
+            monitor_id: rule.monitor_id,
+            id: rule.id,
+            delay: rule.delay,
+            duration: rule.delay, // Support both delay and duration for compatibility
+            active: rule.active,
+            notificationIds: ruleNotificationMap.get(rule.id) || [],
+            notificationIDList: (ruleNotificationMap.get(rule.id) || []).reduce((acc, id) => {
+                acc[id] = true;
+                return acc;
+            }, {})
+        }));
+    }
+
+    /**
      * prepare preloaded data for efficient access
      * @param {Array} monitorData IDs & active field of monitor to get
      * @returns {Promise<LooseObject<any>>} object
@@ -1623,17 +1973,20 @@ class Monitor extends BeanModel {
         const activeStatusMap = new Map();
         const forceInactiveMap = new Map();
         const pathsMap = new Map();
+        const dependenciesMap = new Map();
         const notificationRulesMap = new Map();
 
         if (monitorData.length > 0) {
             const monitorIDs = monitorData.map(monitor => monitor.id);
             const notifications = await Monitor.getMonitorNotification(monitorIDs);
             const tags = await Monitor.getMonitorTag(monitorIDs);
+            const notificationRules = await Monitor.getMonitorNotificationRules(monitorIDs);
             const maintenanceStatuses = await Promise.all(monitorData.map(monitor => Monitor.isUnderMaintenance(monitor.id)));
             const childrenIDs = await Promise.all(monitorData.map(monitor => Monitor.getAllChildrenIDs(monitor.id)));
             const activeStatuses = await Promise.all(monitorData.map(monitor => Monitor.isActive(monitor.id, monitor.active)));
             const forceInactiveStatuses = await Promise.all(monitorData.map(monitor => Monitor.isParentActive(monitor.id)));
             const paths = await Promise.all(monitorData.map(monitor => Monitor.getAllPath(monitor.id, monitor.name)));
+            const dependencies = await Promise.all(monitorData.map(monitor => Monitor.getDependencies(monitor.id)));
 
             notifications.forEach(row => {
                 if (!notificationsMap.has(row.monitor_id)) {
@@ -1675,39 +2028,17 @@ class Monitor extends BeanModel {
                 pathsMap.set(monitor.id, paths[index]);
             });
 
-            const allRules = await R.getAll(`
-                SELECT * FROM monitor_notification_rule
-                WHERE monitor_id IN (${monitorIDs.map(() => "?").join(",")})
-            `, monitorIDs);
+            monitorData.forEach((monitor, index) => {
+                dependenciesMap.set(monitor.id, dependencies[index]);
+            });
 
-            if (allRules.length > 0) {
-                const ruleIDs = allRules.map(r => r.id);
-                const allRuleNotifications = await R.getAll(`
-                    SELECT mnrn.monitor_notification_rule_id, mnrn.notification_id 
-                    FROM monitor_notification_rule_notification mnrn
-                    WHERE mnrn.monitor_notification_rule_id IN (${ruleIDs.map(() => "?").join(",")})
-                `, ruleIDs);
-
-                const ruleNotificationsMap = {};
-                for (const rn of allRuleNotifications) {
-                    if (!ruleNotificationsMap[rn.monitor_notification_rule_id]) {
-                        ruleNotificationsMap[rn.monitor_notification_rule_id] = {};
-                    }
-                    ruleNotificationsMap[rn.monitor_notification_rule_id][rn.notification_id] = true;
+            // Build notification rules map
+            notificationRules.forEach(rule => {
+                if (!notificationRulesMap.has(rule.monitor_id)) {
+                    notificationRulesMap.set(rule.monitor_id, []);
                 }
-
-                for (const rule of allRules) {
-                    rule.notificationIDList = ruleNotificationsMap[rule.id] || {};
-                    rule.active = Boolean(rule.active);
-                }
-
-                for (const rule of allRules) {
-                    if (!notificationRulesMap.has(rule.monitor_id)) {
-                        notificationRulesMap.set(rule.monitor_id, []);
-                    }
-                    notificationRulesMap.get(rule.monitor_id).push(rule);
-                }
-            }
+                notificationRulesMap.get(rule.monitor_id).push(rule);
+            });
         }
 
         return {
@@ -1718,6 +2049,7 @@ class Monitor extends BeanModel {
             activeStatus: activeStatusMap,
             forceInactive: forceInactiveMap,
             paths: pathsMap,
+            dependencies: dependenciesMap,
             notificationRules: notificationRulesMap,
         };
     }
@@ -1759,7 +2091,7 @@ class Monitor extends BeanModel {
      * @returns {Promise<string[]>} Full path (includes groups and the name) of the monitor
      */
     static async getAllPath(monitorID, name) {
-        const path = [name];
+        const path = [ name ];
 
         if (this.parent === null) {
             return path;
@@ -1901,6 +2233,195 @@ class Monitor extends BeanModel {
             log.debug("monitor", `[${this.name}] call checkCertExpiryNotifications`);
             await this.checkCertExpiryNotifications(tlsInfo);
         }
+    }
+
+    /**
+     * Get all monitors that this monitor depends on
+     * @param {number} monitorID ID of monitor to get dependencies for
+     * @returns {Promise<LooseObject<any>[]>} List of monitors this monitor depends on
+     */
+    static async getDependencies(monitorID) {
+        return await R.getAll(`
+            SELECT 
+                md.id as dependency_id,
+                md.relation_type,
+                m.id,
+                m.name,
+                m.type,
+                m.active,
+                h.status,
+                h.msg
+            FROM monitor_dependency md
+            JOIN monitor m ON md.depends_on_monitor_id = m.id
+            LEFT JOIN (
+                SELECT monitor_id, status, msg
+                FROM heartbeat
+                WHERE id IN (
+                    SELECT MAX(id) FROM heartbeat GROUP BY monitor_id
+                )
+            ) h ON m.id = h.monitor_id
+            WHERE md.monitor_id = ?
+            ORDER BY m.name
+        `, [ monitorID ]);
+    }
+
+    /**
+     * Get all monitors that depend on this monitor
+     * @param {number} monitorID ID of monitor to get dependents for
+     * @returns {Promise<LooseObject<any>[]>} List of monitors that depend on this monitor
+     */
+    static async getDependents(monitorID) {
+        return await R.getAll(`
+            SELECT 
+                md.id as dependency_id,
+                md.relation_type,
+                m.id,
+                m.name,
+                m.type,
+                m.active,
+                h.status,
+                h.msg
+            FROM monitor_dependency md
+            JOIN monitor m ON md.monitor_id = m.id
+            LEFT JOIN (
+                SELECT monitor_id, status, msg
+                FROM heartbeat
+                WHERE id IN (
+                    SELECT MAX(id) FROM heartbeat GROUP BY monitor_id
+                )
+            ) h ON m.id = h.monitor_id
+            WHERE md.depends_on_monitor_id = ?
+            ORDER BY m.name
+        `, [ monitorID ]);
+    }
+
+    /**
+     * Add a dependency relationship
+     * @param {number} monitorID ID of monitor that depends on another
+     * @param {number} dependsOnMonitorID ID of monitor being depended on
+     * @param {string} relationType Type of dependency (hard/soft)
+     * @returns {Promise<void>}
+     */
+    static async addDependency(monitorID, dependsOnMonitorID, relationType = "hard") {
+        // Prevent self-dependency
+        if (monitorID === dependsOnMonitorID) {
+            throw new Error("A monitor cannot depend on itself");
+        }
+
+        // Check for circular dependency
+        const wouldCreateCycle = await Monitor.wouldCreateCircularDependency(monitorID, dependsOnMonitorID);
+        if (wouldCreateCycle) {
+            throw new Error("This dependency would create a circular dependency");
+        }
+
+        // Check if dependency already exists
+        const existing = await R.findOne("monitor_dependency", 
+            "monitor_id = ? AND depends_on_monitor_id = ?", 
+            [ monitorID, dependsOnMonitorID ]);
+        
+        if (existing) {
+            // Update existing dependency
+            existing.relation_type = relationType;
+            await R.store(existing);
+        } else {
+            // Create new dependency
+            const dependency = R.dispense("monitor_dependency");
+            dependency.monitor_id = monitorID;
+            dependency.depends_on_monitor_id = dependsOnMonitorID;
+            dependency.relation_type = relationType;
+            await R.store(dependency);
+        }
+    }
+
+    /**
+     * Remove a dependency relationship
+     * @param {number} monitorID ID of monitor that depends on another
+     * @param {number} dependsOnMonitorID ID of monitor being depended on
+     * @returns {Promise<void>}
+     */
+    static async removeDependency(monitorID, dependsOnMonitorID) {
+        await R.exec(
+            "DELETE FROM monitor_dependency WHERE monitor_id = ? AND depends_on_monitor_id = ?",
+            [ monitorID, dependsOnMonitorID ]
+        );
+    }
+
+    /**
+     * Remove all dependencies for a monitor
+     * @param {number} monitorID ID of monitor to remove dependencies for
+     * @returns {Promise<void>}
+     */
+    static async removeAllDependencies(monitorID) {
+        await R.exec(
+            "DELETE FROM monitor_dependency WHERE monitor_id = ? OR depends_on_monitor_id = ?",
+            [ monitorID, monitorID ]
+        );
+    }
+
+    /**
+     * Check if adding a dependency would create a circular dependency
+     * @param {number} monitorID ID of monitor that would depend on another
+     * @param {number} dependsOnMonitorID ID of monitor being depended on
+     * @returns {Promise<boolean>} True if it would create a cycle
+     */
+    static async wouldCreateCircularDependency(monitorID, dependsOnMonitorID) {
+        // If the target monitor already depends on this monitor (directly or indirectly),
+        // adding this dependency would create a cycle
+        const visited = new Set();
+        const toVisit = [ dependsOnMonitorID ];
+
+        while (toVisit.length > 0) {
+            const currentID = toVisit.shift();
+            
+            if (currentID === monitorID) {
+                return true; // Found a path back to monitorID, cycle detected
+            }
+
+            if (visited.has(currentID)) {
+                continue; // Already visited this node
+            }
+
+            visited.add(currentID);
+
+            // Get all monitors that currentID depends on
+            const dependencies = await R.getAll(
+                "SELECT depends_on_monitor_id FROM monitor_dependency WHERE monitor_id = ?",
+                [ currentID ]
+            );
+
+            for (const dep of dependencies) {
+                toVisit.push(dep.depends_on_monitor_id);
+            }
+        }
+
+        return false; // No cycle detected
+    }
+
+    /**
+     * Get dependency status for a monitor (whether any dependencies are down)
+     * This helps determine if a monitor is down due to its dependencies
+     * @param {number} monitorID ID of monitor to check
+     * @returns {Promise<LooseObject<any>>} Dependency status information
+     */
+    static async getDependencyStatus(monitorID) {
+        const dependencies = await Monitor.getDependencies(monitorID);
+        const downDependencies = dependencies.filter(dep => dep.status === DOWN || dep.status === PENDING);
+        const allDependenciesUp = downDependencies.length === 0;
+
+        return {
+            hasDependencies: dependencies.length > 0,
+            totalDependencies: dependencies.length,
+            downDependencies: downDependencies.length,
+            allDependenciesUp,
+            dependencies: dependencies.map(dep => ({
+                id: dep.id,
+                name: dep.name,
+                type: dep.type,
+                status: dep.status,
+                relationType: dep.relation_type,
+                msg: dep.msg
+            }))
+        };
     }
 }
 

@@ -960,7 +960,7 @@
                                 </button>
                             </div>
 
-                            <div v-for="(rule, index) in monitor.notificationRules" :key="index" class="card mb-3">
+                            <div v-for="(rule, index) in monitor.notificationRules" :key="index" class="card mb-3 notification-rule-card">
                                 <div class="card-body">
                                     <div class="row">
                                         <div class="col-md-4">
@@ -970,15 +970,18 @@
                                         <div class="col-md-8">
                                             <label class="form-label">{{ $t("Notifications") }}</label>
                                             <VueMultiselect
+                                                :id="'notification-rule-' + index"
                                                 v-model="rule.selectedNotifications"
                                                 :options="$root.notificationList"
                                                 :multiple="true"
                                                 :close-on-select="false"
                                                 :clear-on-select="false"
                                                 :preserve-search="true"
-                                                placeholder="Select Notifications"
+                                                :placeholder="$t('Select Notifications')"
                                                 label="name"
                                                 track-by="id"
+                                                :hide-selected="false"
+                                                class="notification-rule-select"
                                             />
                                         </div>
                                     </div>
@@ -2312,5 +2315,76 @@ message HealthCheckResponse {
 
     textarea {
         min-height: 200px;
+    }
+
+    .notification-rule-card {
+        border-radius: 0.375rem;
+    }
+
+    .notification-rule-select {
+        .multiselect__tags {
+            border-radius: 0.375rem;
+            border: 1px solid #ced4da;
+            min-height: 38px;
+            padding: 0.375rem 2.25rem 0.375rem 0.75rem;
+            background-color: #fff;
+        }
+
+        .multiselect--active .multiselect__tags {
+            border-radius: 0.375rem;
+            border-color: #86b7fe;
+            outline: 0;
+            box-shadow: 0 0 0 0.25rem rgba(13, 110, 253, 0.25);
+        }
+
+        .multiselect__tag {
+            display: none;
+        }
+
+        .multiselect__placeholder {
+            color: #6c757d;
+            padding-top: 0.375rem;
+            margin-bottom: 0;
+        }
+
+        .multiselect__single {
+            padding-top: 0.375rem;
+            margin-bottom: 0;
+            line-height: 1.5;
+        }
+
+        .multiselect__content-wrapper {
+            border-radius: 0.375rem;
+            border: 1px solid #ced4da;
+            box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.15);
+            z-index: 1000;
+            background-color: #fff;
+        }
+
+        .multiselect__option {
+            padding: 0.5rem 1rem;
+            min-height: auto;
+        }
+
+        .multiselect__option--selected {
+            background-color: #e7f1ff;
+            color: #0a58ca;
+        }
+
+        .multiselect__option--selected::after {
+            content: "✓";
+            float: right;
+            color: #0a58ca;
+            font-weight: bold;
+        }
+
+        .multiselect__option--highlight {
+            background-color: #0d6efd;
+            color: #fff;
+        }
+
+        .multiselect__option--highlight::after {
+            background: transparent;
+        }
     }
 </style>
