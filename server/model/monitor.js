@@ -6,7 +6,8 @@ const { log, UP, DOWN, PENDING, MAINTENANCE, flipStatus, MAX_INTERVAL_SECOND, MI
     PING_PACKET_SIZE_MIN, PING_PACKET_SIZE_MAX, PING_PACKET_SIZE_DEFAULT,
     PING_GLOBAL_TIMEOUT_MIN, PING_GLOBAL_TIMEOUT_MAX, PING_GLOBAL_TIMEOUT_DEFAULT,
     PING_COUNT_MIN, PING_COUNT_MAX, PING_COUNT_DEFAULT,
-    PING_PER_REQUEST_TIMEOUT_MIN, PING_PER_REQUEST_TIMEOUT_MAX, PING_PER_REQUEST_TIMEOUT_DEFAULT
+    PING_PER_REQUEST_TIMEOUT_MIN, PING_PER_REQUEST_TIMEOUT_MAX, PING_PER_REQUEST_TIMEOUT_DEFAULT,
+    getMonitorRelativeURL
 } = require("../../src/util");
 const { ping, checkCertificate, checkStatusCode, getTotalClientInRoom, setting, mssqlQuery, postgresQuery, mysqlQuery, setSetting, httpNtlm, radius,
     kafkaProducerAsync, getOidcTokenClientCredentials, rootCertificatesFingerprints, axiosAbortSignal, checkCertificateHostname
@@ -926,7 +927,7 @@ class Monitor extends BeanModel {
                 if (Monitor.isImportantForNotification(isFirstBeat, previousBeat?.status, bean.status)) {
                     log.debug("monitor", `[${this.name}] sendNotification`);
                     try {
-                        await Monitor.sendNotification(isFirstBeat, this, bean);
+                        await Monitor.sendNotification(isFirstBeat, this, bean, null, previousBeat?.status);
                     } catch (e) {
                         // Don't let notification errors prevent heartbeat from being sent
                         log.error("monitor", `[${this.name}] Failed to send notification: ${e.message}`);
@@ -1452,9 +1453,21 @@ class Monitor extends BeanModel {
      * @param {Array|null} overrideNotificationList Optional: override notification list (e.g., from notification rules)
      * @returns {void}
      */
-    static async sendNotification(isFirstBeat, monitor, bean, overrideNotificationList = null) {
+    /**
+     * Send a notification about a monitor
+     * @param {boolean} isFirstBeat Is this beat the first of this monitor?
+     * @param {Monitor} monitor The monitor to send a notification about
+     * @param {Bean} bean Status information about monitor
+     * @param {Array|null} overrideNotificationList Optional: override notification list (e.g., from notification rules)
+     * @param {number|null} previousBeatStatus Optional: previous beat status (for determining if this is an important beat)
+     * @returns {void}
+     */
+    static async sendNotification(isFirstBeat, monitor, bean, overrideNotificationList = null, previousBeatStatus = null) {
         if (!isFirstBeat || bean.status === DOWN) {
-            const notificationList = overrideNotificationList || await Monitor.getNotificationList(monitor, bean);
+            // Check if this is an important beat (status change like UP -> DOWN)
+            // Use bean.important if available, otherwise calculate from previousBeatStatus
+            const isImportantBeat = bean.important !== undefined ? bean.important : Monitor.isImportantForNotification(isFirstBeat, previousBeatStatus, bean.status);
+            const notificationList = overrideNotificationList || await Monitor.getNotificationList(monitor, bean, isImportantBeat);
             
             log.debug("monitor", `[${monitor.name}] sendNotification: isFirstBeat=${isFirstBeat}, status=${bean.status}, notificationCount=${notificationList.length}, override=${overrideNotificationList !== null}`);
 
@@ -1470,8 +1483,9 @@ class Monitor extends BeanModel {
                 text = "🔴 Down";
             }
 
-            let msg = `[${monitor.name}] [${text}] ${bean.msg}`;
-
+            // Get base URL for dashboard link
+            const baseURL = await setting("primaryBaseURL");
+            
             for (let notification of notificationList) {
                 try {
                     const heartbeatJSON = bean.toJSON();
@@ -1489,6 +1503,45 @@ class Monitor extends BeanModel {
                     heartbeatJSON["timezone"] = await UptimeKumaServer.getInstance().getTimezone();
                     heartbeatJSON["timezoneOffset"] = UptimeKumaServer.getInstance().getTimezoneOffset();
                     heartbeatJSON["localDateTime"] = dayjs.utc(heartbeatJSON["time"]).tz(heartbeatJSON["timezone"]).format(SQL_DATETIME_FORMAT);
+
+                    // Build message with monitor URL and notification time
+                    let msg = `[${monitor.name}] [${text}] ${bean.msg}`;
+                    
+                    // Get monitor URL/address for the notification
+                    const monitorJSON = monitor.toJSON(preloadData, false);
+                    let monitorUrl = null;
+                    
+                    // Extract monitor URL/address based on monitor type
+                    if (monitor.type === "http" || monitor.type === "keyword" || monitor.type === "json-query" || monitor.type === "real-browser") {
+                        monitorUrl = monitor.url || monitor.customUrl;
+                    } else if (monitor.type === "ping") {
+                        monitorUrl = monitor.hostname;
+                    } else if (monitor.type === "port" || monitor.type === "dns" || monitor.type === "gamedig" || monitor.type === "steam") {
+                        if (monitor.port) {
+                            monitorUrl = `${monitor.hostname}:${monitor.port}`;
+                        } else {
+                            monitorUrl = monitor.hostname;
+                        }
+                    }
+                    
+                    // Add monitor URL if available
+                    if (monitorUrl && monitorUrl !== "https://" && monitorUrl !== "http://" && monitorUrl !== "") {
+                        // Format as clickable link if it's a valid URL
+                        if (monitorUrl.startsWith("http://") || monitorUrl.startsWith("https://")) {
+                            msg += `\n\n監測網址: ${monitorUrl}`;
+                        } else {
+                            msg += `\n\n監測網址: ${monitorUrl}`;
+                        }
+                    }
+                    
+                    // Add dashboard URL if available
+                    if (baseURL) {
+                        const dashboardUrl = baseURL + getMonitorRelativeURL(monitor.id);
+                        msg += `\n\n監測連結: ${dashboardUrl}`;
+                    }
+                    
+                    // Add notification time
+                    msg += `\n通知時間: ${heartbeatJSON["localDateTime"]}${heartbeatJSON["timezone"] ? ` (${heartbeatJSON["timezone"]})` : ""}`;
 
                     await Notification.send(JSON.parse(notification.config), msg, monitor.toJSON(preloadData, false), heartbeatJSON);
                 } catch (e) {
@@ -1553,9 +1606,10 @@ class Monitor extends BeanModel {
      * Get list of notification providers for a given monitor
      * @param {Monitor} monitor Monitor to get notification providers for
      * @param {Bean|null} bean Current heartbeat bean (optional, for time-based notification rules)
+     * @param {boolean} isImportantBeat Whether this is an important beat (e.g., UP -> DOWN transition)
      * @returns {Promise<LooseObject<any>[]>} List of notifications
      */
-    static async getNotificationList(monitor, bean = null) {
+    static async getNotificationList(monitor, bean = null, isImportantBeat = false) {
         // Check if notification rules are configured
         let notificationRules = null;
         
@@ -1587,14 +1641,16 @@ class Monitor extends BeanModel {
             } else {
                 const downDuration = await Monitor.getDownDuration(monitor.id, bean);
                 
-                log.debug("monitor", `[${monitor.name}] Notification rules check: downDuration=${downDuration}s, rules=${JSON.stringify(activeRules)}`);
+                log.debug("monitor", `[${monitor.name}] Notification rules check: downDuration=${downDuration}s, isImportantBeat=${isImportantBeat}, rules=${JSON.stringify(activeRules)}`);
                 
                 // Sort rules by duration (ascending) - shortest duration first
                 const sortedRules = [...activeRules].sort((a, b) => (a.duration || a.delay || 0) - (b.duration || b.delay || 0));
                 
-                // When downDuration is null or 0 (first time becoming DOWN), use the rule with minimum duration
+                // When downDuration is null, 0, or very small (< 5 seconds) AND this is an important beat (UP -> DOWN),
+                // use the rule with minimum duration
                 // This ensures that when UP -> DOWN, we notify the notification channel with the smallest duration threshold
-                if (downDuration === null || downDuration === 0) {
+                // We use < 5 seconds threshold to handle cases where getDownDuration might return 1-2 seconds due to timing
+                if (isImportantBeat && (downDuration === null || downDuration === 0 || downDuration < 5)) {
                     if (sortedRules.length > 0) {
                         const minDurationRule = sortedRules[0];
                         const minDuration = minDurationRule.duration || minDurationRule.delay || 0;
@@ -1779,6 +1835,11 @@ class Monitor extends BeanModel {
 
         let sent = false;
         log.debug("monitor", "Send certificate notification");
+
+        // Get base URL for dashboard link
+        const baseURL = await setting("primaryBaseURL");
+        const currentTime = dayjs().tz(await UptimeKumaServer.getInstance().getTimezone()).format(SQL_DATETIME_FORMAT);
+        const timezone = await UptimeKumaServer.getInstance().getTimezone();
 
         for (let notification of notificationList) {
             try {
