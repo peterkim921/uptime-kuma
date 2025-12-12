@@ -8,11 +8,12 @@ Here is the link to original repo: https://github.com/louislam/uptime-kuma
 - Generating a professional report for all monitor performance
 - Allowing users to monitor reports using a custom time range
 - DNS wildcard function
-- filtering out IP input from the DNS monitor.
+- Filtering out IP input from the DNS monitor.
 - Double notification: sending notification to another user after pre-defined time period.
 
 ## ⭐ Motivations
 Regarding the DNS monitoring features, we discovered an existing issue in the original repository that we believe we can resolve.Here is the link to that issue: https://github.com/louislam/uptime-kuma/issues/6444
+
 As for the other proposed features, we can proudly say that we conceived them entirely ourselves. We personally cloned and used the repository, identified several areas that could be significantly improved. After several discussions, and utilizing AI to help clarify our ideas, we are now proposing these wonderful features.
 
 ## ⭐ How to Install
