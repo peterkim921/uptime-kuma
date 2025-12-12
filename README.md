@@ -27,7 +27,6 @@ Requirements:
   - ❌ Replit / Heroku
 - [Node.js](https://nodejs.org/en/download/) >= 20.4
 - [Git](https://git-scm.com/downloads)
-- [pm2](https://pm2.keymetrics.io/) - For running Uptime Kuma in the background
 
 ```bash
 git clone https://github.com/louislam/uptime-kuma.git
